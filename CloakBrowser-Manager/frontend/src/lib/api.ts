@@ -34,6 +34,14 @@ export interface Profile {
   vnc_ws_port: number | null;
   cdp_url: string | null;
   last_launched: string | null;
+  fingerprint_locked: boolean;
+  session_auto_save: boolean;
+  auto_sync_timezone_with_proxy: boolean;
+  auto_sync_locale_with_proxy: boolean;
+  auto_sync_geolocation_with_proxy: boolean;
+  last_fingerprint_change_at: string | null;
+  last_session_save_at: string | null;
+  last_proxy_change_at: string | null;
 }
 
 export interface ProfileCreateData {
@@ -60,6 +68,11 @@ export interface ProfileCreateData {
   launch_args?: string[];
   notes?: string | null;
   tags?: { tag: string; color: string | null }[];
+  fingerprint_locked?: boolean;
+  session_auto_save?: boolean;
+  auto_sync_timezone_with_proxy?: boolean;
+  auto_sync_locale_with_proxy?: boolean;
+  auto_sync_geolocation_with_proxy?: boolean;
 }
 
 export interface Proxy {
@@ -160,9 +173,14 @@ async function request<T>(
   options?: RequestInit,
 ): Promise<T> {
   const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const simulatedRole = localStorage.getItem("cloak_simulated_role") || "user";
   const res = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
     ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "X-User-Role": simulatedRole,
+      ...(options?.headers || {}),
+    },
   });
   if (!res.ok) {
     if (res.status === 401 && _onUnauthorized) {
@@ -268,4 +286,62 @@ export const api = {
 
   getClipboard: (id: string) =>
     request<{ text: string }>(`/api/profiles/${id}/clipboard`),
+
+  regenerateFingerprint: (id: string) =>
+    request<Profile>(`/api/profiles/${id}/regenerate-fingerprint`, { method: "POST" }),
+
+  exportPackage: async (id: string, passphrase?: string | null, include_proxy_secret: boolean = false): Promise<{ export_path?: string } | Blob> => {
+    const simulatedRole = localStorage.getItem("cloak_simulated_role") || "user";
+    const res = await fetch(`${API_BASE}/api/profiles/${id}/export-package`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Role": simulatedRole,
+      },
+      body: JSON.stringify({ passphrase: passphrase || null, include_proxy_secret }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let msg = res.statusText;
+      if (body.detail) {
+        msg = body.detail.message || body.detail || res.statusText;
+      }
+      throw new Error(msg);
+    }
+    const contentType = res.headers.get("content-type");
+    if (contentType && contentType.includes("application/json")) {
+      return res.json();
+    } else {
+      return res.blob();
+    }
+  },
+
+  importPackage: async (file: File, passphrase?: string | null, mode: "new_profile" | "overwrite" = "new_profile", targetProfileId?: string | null): Promise<{ status: string; profile_id: string }> => {
+    const simulatedRole = localStorage.getItem("cloak_simulated_role") || "user";
+    const formData = new FormData();
+    formData.append("file", file);
+    if (passphrase) {
+      formData.append("passphrase", passphrase);
+    }
+    formData.append("mode", mode);
+    if (targetProfileId) {
+      formData.append("target_profile_id", targetProfileId);
+    }
+    const res = await fetch(`${API_BASE}/api/profiles/import-package`, {
+      method: "POST",
+      headers: {
+        "X-User-Role": simulatedRole,
+      },
+      body: formData,
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      let msg = res.statusText;
+      if (body.detail) {
+        msg = body.detail.message || body.detail || res.statusText;
+      }
+      throw new Error(msg);
+    }
+    return res.json();
+  },
 };

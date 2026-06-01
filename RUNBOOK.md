@@ -95,46 +95,97 @@ Tất cả dữ liệu cấu hình, cookies, session và bộ nhớ đệm của
 2. Giải nén bản sao lưu đè trực tiếp lên thư mục App Data Path tương ứng với hệ điều hành của bạn.
 3. Khởi động lại ứng dụng, toàn bộ cấu hình, tài khoản và session của bạn sẽ xuất hiện nguyên vẹn.
 
-### 2.9 Cách Cập nhật ứng dụng (Update App)
-1. **Cập nhật tự động (Auto-Update)**:
-   - Khi khởi chạy, ứng dụng sẽ kiểm tra phiên bản mới trên máy chủ phát hành.
-   - Nếu có phiên bản mới, ứng dụng sẽ tải về ngầm và hiển thị thông báo yêu cầu người dùng khởi động lại để hoàn tất cập nhật.
-2. **Cập nhật thủ công**:
-   - Tải file cài đặt `.dmg` hoặc `.exe` mới nhất từ trang chủ.
-   - Tiến hành cài đặt đè lên phiên bản cũ. Toàn bộ cấu hình và dữ liệu profile cũ trong thư mục **App Data Path** được giữ nguyên hoàn toàn mà không bị ảnh hưởng.
+---
 
-### 2.10 Cách Đóng gói / Build Installer (.dmg / .exe)
-Để đóng gói sản phẩm phục vụ phát hành, hãy chạy các script tương ứng trong thư mục dự án:
-1. **Cài đặt thư viện phát triển**:
-   ```bash
-   npm install
-   pip install -r backend/requirements.txt
-   ```
-2. **Build Frontend**:
-   ```bash
-   npm run build
-   ```
-3. **Build Backend sang dạng Binary độc lập (PyInstaller)**:
-   ```bash
-   npm run backend:build
-   ```
-4. **Build Installer cho Desktop App (Electron Builder)**:
-   - **macOS** (tạo file `.dmg`):
-     ```bash
-     npm run desktop:build:mac
-     ```
-   - **Windows** (tạo file `.exe`):
-     ```bash
-     npm run desktop:build:win
-     ```
-   Sản phẩm đóng gói hoàn chỉnh sẽ nằm trong thư mục `dist/` để sẵn sàng phân phối.
+## 3. Portable Profile Package & Fingerprint Lock
+
+### 3.1 Portable Profile Package là gì?
+**Portable Profile Package** (định dạng `.cbprofile`) là giải pháp chuẩn hóa để chuyển giao toàn bộ trạng thái hoạt động của một profile trình duyệt giữa các thiết bị vật lý hoặc các môi trường khác nhau mà vẫn đảm bảo tính kế thừa tuyệt đối. 
+
+Không chỉ đơn thuần sao lưu tài khoản, gói dữ liệu này bao gồm:
+* **Thông tin Session/Cookies**: Cookies, `localStorage`, `sessionStorage`, `IndexedDB`, `Service Worker data`, dữ liệu `Cache` cần thiết, và các tùy chọn `Preferences`.
+* **Cấu hình Fingerprint Core**: Cấu hình profile, `fingerprint_seed`, cấu hình giả lập Canvas, WebGL, Font danh sách, múi giờ (timezone), ngôn ngữ (locale), `user-agent`, độ phân giải màn hình (`screen size`), cùng metadata phiên bản trình duyệt (`browser version metadata`).
+
+### 3.2 Vì sao không chỉ export cookies?
+Export/Import mỗi cookie là **không đủ** để duy trì trạng thái đăng nhập hoặc độ tin cậy của tài khoản trên các nền tảng lớn (Facebook, Google, Amazon).
+* Nhiều website hiện đại lưu trữ trạng thái đăng nhập và session token trong `localStorage` hoặc `IndexedDB`.
+* Nếu chỉ chuyển giao cookies mà thay đổi hoàn toàn vân tay trình duyệt (`fingerprint`), hệ thống bảo mật của website sẽ lập tức phát hiện sự bất thường (mâu thuẫn giữa cookies cũ và cấu hình thiết bị mới), dẫn đến xác minh danh tính (checkpoint, khóa tài khoản).
+* Định dạng `.cbprofile` đảm bảo **đồng bộ cả dữ liệu phiên hoạt động và vân tay số trình duyệt**.
+
+### 3.3 Phân quyền Export/Import
+* **Staff (Nhân viên thường)**: **KHÔNG** được phép thực hiện Export hoặc Import profile package để ngăn ngừa rủi ro rò rỉ dữ liệu tài nguyên của doanh nghiệp.
+* **Admin**: Được phép Export và Import các profile package giữa các máy.
+* **Super Admin**: Được phép sử dụng toàn bộ tính năng và các công cụ nâng cao (Advanced Tools).
+
+### 3.4 Quy trình Export Profile
+1. Đảm bảo profile cần xuất đang ở trạng thái **Dừng (Stopped)**. 
+   > [!WARNING]
+   > Hệ thống sẽ chặn hoàn toàn và báo lỗi nếu bạn cố gắng export một profile đang chạy (`running`).
+2. Chọn profile mong muốn từ danh sách và click **Export Profile**.
+3. Nhập mật khẩu bảo vệ (**Passphrase**) để mã hóa gói dữ liệu an toàn bằng thuật toán AES.
+4. Tùy chọn gán bảo mật: Theo mặc định, ứng dụng sẽ **không xuất mật khẩu proxy** kèm theo gói để bảo vệ tài nguyên mạng của doanh nghiệp (có thể bật thủ công nếu cần thiết).
+5. Nhấn **Export** và lưu trữ file `.cbprofile` thu được vào nơi an toàn.
+
+> [!CAUTION]
+> File `.cbprofile` chứa toàn bộ session đăng nhập đang hoạt động của tài khoản. Tuyệt đối không gửi file này qua các kênh chat công cộng không an toàn hoặc chia sẻ cho người không có thẩm quyền.
+
+### 3.5 Quy trình Import Profile
+1. Khởi động ứng dụng trên máy tính mới hoặc trong thư mục App Data Folder sạch.
+2. Di chuyển đến mục **Import Profile**.
+3. Chọn file `.cbprofile` cần nhập và nhập chính xác **Passphrase** bảo vệ.
+4. Lựa chọn chế độ import:
+   - **Import as new profile**: Tạo một profile hoàn toàn mới có ID mới kế thừa cấu hình gốc.
+   - **Overwrite existing profile**: Ghi đè trực tiếp lên một profile hiện tại (Profile đích bắt buộc phải đang ở trạng thái **Stopped**).
+5. Nhấn **Import** để hoàn tất phục hồi.
+6. Tiến hành **Launch profile** để kiểm tra tính toàn vẹn của phiên hoạt động.
+
+### 3.6 Fingerprint Lock (Khóa Vân tay trình duyệt)
+Tính năng **Fingerprint Locked = ON** (mặc định kích hoạt) giúp cố định hoàn toàn danh tính kỹ thuật số của profile trình duyệt, ngăn chặn các hành vi vô tình làm thay đổi cấu hình gốc.
+
+* **Khi Fingerprint Lock đang bật**, các thông số sau sẽ **bị khóa cứng** và không thể sửa đổi:
+  - `fingerprint_seed`, canvas config/seed, WebGL vendor/renderer, font list, `user-agent`, screen size, `hardwareConcurrency`, `deviceMemory`, audio fingerprint, và browser version lock.
+* **Đổi Proxy an toàn**: Khi bạn tiến hành thay đổi Proxy của profile, hệ thống **chỉ cập nhật cấu hình proxy**, hoàn toàn không tác động đến các core fingerprint nêu trên. Ứng dụng sẽ hiển thị thông báo rõ ràng:
+  `Proxy changed. Fingerprint unchanged.`
+
+### 3.7 Cơ chế ghi đè dữ liệu khi tắt Profile
+Khi bạn khởi chạy, sử dụng profile trên máy mới và **Dừng (Stop)** trình duyệt:
+* **Các thành phần ĐƯỢC cập nhật & lưu trữ**: Cookies mới phát sinh, bộ nhớ `localStorage`/`sessionStorage` mới, `IndexedDB`, `Service Worker`, cache web, site settings và extension data.
+* **Các thông số KHÔNG bao giờ bị thay đổi**: Toàn bộ core fingerprint (canvas, font, WebGL, UA, screen, hardware info,...) được giữ nguyên tuyệt đối để bảo toàn vân tay trình duyệt.
+* **Tự động lưu**: Nếu tính năng `session_auto_save = true`, timestamp `last_session_save_at` sẽ tự động được ghi nhận.
+
+### 3.8 Hướng dẫn Giả lập 2 Máy (Local Simulation Test)
+Để kiểm thử tính năng Portable Profile Package mà không cần 2 máy vật lý thật, bạn có thể sử dụng biến môi trường `APP_DATA_DIR` để khởi chạy 2 phiên bản độc lập trên cùng 1 máy tính:
+
+* **Mở Máy A (Môi trường A)**:
+  ```bash
+  cd CloakBrowser-Manager
+  APP_DATA_DIR="$HOME/Desktop/cbtest-machine-a" npm run desktop:dev
+  ```
+* **Mở Máy B (Môi trường B)**:
+  ```bash
+  cd CloakBrowser-Manager
+  APP_DATA_DIR="$HOME/Desktop/cbtest-machine-b" npm run desktop:dev
+  ```
+
+**Quy trình kiểm thử:**
+1. Trên ứng dụng **Máy A**: Tạo một profile trình duyệt (ví dụ: `Test-Machine-A`), bật Fingerprint Locked. Khởi chạy và truy cập một vài website để tạo dữ liệu cookies/session, sau đó dừng profile.
+2. Thực hiện **Export** profile đó thành file `Test-Machine-A.cbprofile` ra ngoài Desktop. Đóng hoàn toàn app Máy A.
+3. Trên ứng dụng **Máy B**: Ứng dụng sẽ mở ra hoàn toàn trống trơn (không chứa dữ liệu của Máy A). Tiến hành **Import** file `.cbprofile` từ Desktop.
+4. Khởi chạy profile vừa import trên Máy B, xác nhận trạng thái đăng nhập (session/cookies) và kiểm tra các thông số vân tay trên các trang check fingerprint hoàn toàn trùng khớp với Máy A.
 
 ---
 
-## 3. Bảng mã lỗi Hệ thống & Hướng dẫn xử lý (System Error Codes)
+## 4. Bảng mã lỗi Hệ thống & Hướng dẫn xử lý (System Error Codes)
 
 | Mã lỗi (Error Code) | Ý nghĩa / Nguyên nhân | Hướng dẫn khắc phục cụ thể |
 | :--- | :--- | :--- |
+| `PROFILE_RUNNING_EXPORT_DENIED` | Cố gắng export một profile đang ở trạng thái hoạt động (`starting` hoặc `running`). | Tiến hành nhấn nút **Dừng (Stop)** profile trước khi export. |
+| `PROFILE_RUNNING_IMPORT_DENIED` | Cố gắng import ghi đè (`overwrite`) vào một profile đang chạy. | Dừng profile đích đang chạy trước khi thực hiện ghi đè. |
+| `PROFILE_PACKAGE_INVALID` | File `.cbprofile` tải lên không đúng định dạng zip hoặc bị thiếu file cấu hình quan trọng (`metadata.json`). | Kiểm tra lại tệp tin được chọn, đảm bảo tệp tin được sinh ra từ tính năng Export của CloakBrowser. |
+| `PROFILE_PACKAGE_CHECKSUM_FAILED` | File package bị can thiệp thay đổi cấu trúc hoặc bị hỏng trong quá trình truyền tải (lỗi hash checksum). | Hãy thực hiện export lại tệp tin từ máy gốc và chuyển giao lại qua đường truyền an toàn hơn. |
+| `PROFILE_PACKAGE_DECRYPT_FAILED` | Giải mã thất bại do nhập sai **Passphrase** bảo vệ. | Hãy nhập chính xác mật khẩu bảo vệ đã thiết lập khi export tệp tin. |
+| `BROWSER_VERSION_MISMATCH` | Phiên bản CloakBrowser trên máy nhập khác biệt lớn so với máy xuất, gây rủi ro lệch vân tay. | Cài đặt phiên bản CloakBrowser tương thích hoặc nhấn xác nhận bỏ qua cảnh báo nếu tin tưởng. |
+| `FINGERPRINT_LOCKED` | Cố gắng thay đổi các trường vân tay cốt lõi khi profile đang ở chế độ khóa (`Fingerprint Locked = ON`). | Chỉ tài khoản có quyền Admin/Super Admin mới được phép mở khóa hoặc thực hiện tái tạo vân tay (`regenerate`). |
 | `BACKEND_START_FAILED` | Electron không thể khởi chạy tiến trình FastAPI Backend (do thiếu thư viện Python, file binary bị hỏng hoặc Antivirus chặn). | 1. Trên máy dev: Chạy lại `pip install -r backend/requirements.txt` trong `.venv`. <br>2. Thêm file chạy backend vào danh sách loại trừ (Exclusion) của Windows Defender / Antivirus. |
 | `BACKEND_HEALTH_CHECK_FAILED` | Backend đã khởi chạy nhưng không phản hồi request ping từ Electron (hết thời gian timeout 10 giây). | Kiểm tra logs `backend.log` để xem có lỗi kết nối SQLite database hoặc lỗi cấu hình mạng nội bộ hay không. |
 | `PORT_CONFLICT` | Cổng mặc định `8080` (hoặc cổng cấu hình) đã bị chiếm bởi một ứng dụng khác trên máy tính. | Electron sẽ tự động quét và chuyển sang cổng trống tiếp theo (e.g. `8081`, `8082`). Nếu vẫn lỗi, hãy đóng bớt ứng dụng chạy ngầm hoặc thay đổi cấu hình cổng mặc định. |
@@ -149,7 +200,15 @@ Tất cả dữ liệu cấu hình, cookies, session và bộ nhớ đệm của
 
 ---
 
-## 4. Checklist trước khi Phát hành (Pre-release Checklist)
+## 5. Quy định An toàn thông tin (Security Notes)
+* **Tuyệt đối không lưu cookies hoặc dữ liệu localStorage vào logs hệ thống** để tránh lộ lọt thông tin tài khoản người dùng.
+* **Không lưu mật khẩu proxy và passphrase giải mã** dưới dạng plain-text vào database hay logs.
+* **Chặn hoàn toàn** hành vi xuất/nhập/ghi đè các profile đang ở trạng thái hoạt động (`running`) để tránh tranh chấp ghi file gây lỗi cấu trúc trình duyệt.
+* Các tệp tin `.cbprofile` xuất ra phải được lưu trữ ở các phân vùng được mã hóa và chuyển giao qua các kênh kết nối có bảo mật (SSL/TLS, SFTP hoặc ổ cứng di động mã hóa).
+
+---
+
+## 6. Checklist trước khi Phát hành (Pre-release Checklist)
 
 Trước khi thực hiện đóng gói installer và phát hành phiên bản mới (Release), người phụ trách kiểm thử (QA/Tester) phải thực hiện đầy đủ checklist kiểm thử sau đây để đảm bảo ứng dụng vận hành đúng chuẩn Desktop App và không phụ thuộc Docker:
 
@@ -166,12 +225,12 @@ Trước khi thực hiện đóng gói installer và phát hành phiên bản m�
 
 ---
 
-## 5. Phụ lục: Docker & Môi trường ảo (Chỉ dành cho Dev / Debug)
+## 7. Phụ lục: Docker & Môi trường ảo (Chỉ dành cho Dev / Debug)
 
 > [!IMPORTANT]
 > Hướng dẫn chạy bằng Docker bên dưới chỉ phục vụ mục đích **phát triển (development), kiểm thử (testing), hoặc debug hệ thống**. Đây KHÔNG phải là luồng vận hành chính dành cho người dùng cuối của ứng dụng.
 
-### 5.1 Hạn chế của luồng Docker / VNC / noVNC
+### 7.1 Hạn chế của luồng Docker / VNC / noVNC
 * **Bị phát hiện fingerprint**: Việc giả lập màn hình thông qua VNC/noVNC hoặc chạy trong môi trường Headless Docker làm tăng tỷ lệ bị phát hiện bởi các thuật toán chống bot nâng cao (như CreepJS, Cloudflare).
 * **Hiệu năng kém**: Đồ họa dựng hình trong container không hỗ trợ tăng tốc phần cứng tốt bằng chạy Native trực tiếp trên hệ điều hành của máy Host.
 * **Thao tác phức tạp**: Phải mở thêm cổng VNC, cấu hình docker-compose và quản lý tài nguyên container phức tạp.

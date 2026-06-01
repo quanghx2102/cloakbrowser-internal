@@ -14,6 +14,22 @@ export class BackendManager {
   }
 
   private resolveDataDir() {
+    if (process.env.APP_DATA_DIR) {
+      this.dataDir = path.resolve(process.env.APP_DATA_DIR);
+      if (!fs.existsSync(this.dataDir)) {
+        fs.mkdirSync(this.dataDir, { recursive: true });
+      }
+      // Create standard subdirectories
+      const subDirs = ['profiles', 'database', 'logs', 'backups', 'config', 'browsers'];
+      for (const subDir of subDirs) {
+        const fullPath = path.join(this.dataDir, subDir);
+        if (!fs.existsSync(fullPath)) {
+          fs.mkdirSync(fullPath, { recursive: true });
+        }
+      }
+      return;
+    }
+
     const appName = 'CloakInternalTool';
     const oldAppName = 'CloakBrowserManager';
     let oldDataDir = '';

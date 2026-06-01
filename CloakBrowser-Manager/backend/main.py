@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect, Form, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,6 +52,7 @@ try:
     )
     from .proxy_checker import check_proxy
     from .logger_utils import log_activity, log_error
+    from .profile_package import export_profile, import_profile, ProfilePackageError
 except ImportError:
     import backend.database as db
     from backend.browser_manager import BrowserManager
@@ -79,6 +80,7 @@ except ImportError:
     )
     from backend.proxy_checker import check_proxy
     from backend.logger_utils import log_activity, log_error
+    from backend.profile_package import export_profile, import_profile, ProfilePackageError
 
 logger = logging.getLogger("cloakbrowser.manager")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -554,26 +556,117 @@ async def get_profile(profile_id: str):
 
 
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)
-async def update_profile(profile_id: str, req: ProfileUpdate):
+async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     if req.name is not None and not req.name.strip():
         logger.error("PROFILE_UPDATE_FAILED: Name cannot be empty")
         raise HTTPException(status_code=400, detail={"error_code": "PROFILE_UPDATE_FAILED", "message": "Name cannot be empty"})
 
+    existing = db.get_profile(profile_id)
+    if not existing:
+        log_error(
+            module="main",
+            action="update_profile",
+            error_code="PROFILE_UPDATE_FAILED",
+            message="Profile not found",
+            profile_id=profile_id,
+        )
+        raise HTTPException(status_code=404, detail={"error_code": "PROFILE_UPDATE_FAILED", "message": "Profile not found"})
+
+    role = request.headers.get("x-user-role", "user").lower()
+    is_admin = role in ("admin", "super_admin")
+
+    # 1. Check if trying to unlock fingerprint_locked (True -> False)
+    currently_locked = bool(existing.get("fingerprint_locked", True))
+    requested_lock = req.fingerprint_locked
+
+    if requested_lock is False and currently_locked:
+        if not is_admin:
+            raise HTTPException(status_code=403, detail={"error_code": "FORBIDDEN", "message": "Only admin/super_admin can unlock fingerprint"})
+
+    # 2. Check if trying to change core fingerprint fields while fingerprint is locked
+    data = req.model_dump(exclude_unset=True)
+    if currently_locked:
+        core_changed = []
+        for field in ("fingerprint_seed", "gpu_vendor", "gpu_renderer", "platform", "user_agent", "screen_width", "screen_height", "hardware_concurrency"):
+            if field in data and data[field] != existing.get(field):
+                core_changed.append(field)
+        if core_changed:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error_code": "FINGERPRINT_LOCKED",
+                    "message": f"Profile fingerprint is locked. Cannot change core fields: {', '.join(core_changed)}"
+                }
+            )
+
     try:
-        data = req.model_dump(exclude_unset=True)
+        # Check if proxy changed
+        proxy_changed = False
+        if "proxy" in data and data["proxy"] != existing.get("proxy"):
+            proxy_changed = True
+        if "proxy_id" in data and data["proxy_id"] != existing.get("proxy_id"):
+            proxy_changed = True
+
+        # Check if auto-sync settings were toggled/enabled or if proxy changed
+        tz_toggled = data.get("auto_sync_timezone_with_proxy") is True and not existing.get("auto_sync_timezone_with_proxy")
+        loc_toggled = data.get("auto_sync_locale_with_proxy") is True and not existing.get("auto_sync_locale_with_proxy")
+        geo_toggled = data.get("auto_sync_geolocation_with_proxy") is True and not existing.get("auto_sync_geolocation_with_proxy")
+
+        if proxy_changed or tz_toggled or loc_toggled or geo_toggled:
+            pid_to_check = data.get("proxy_id", existing.get("proxy_id"))
+            if pid_to_check:
+                proxy_record = db.get_proxy(pid_to_check)
+                if proxy_record:
+                    auto_sync_tz = data.get("auto_sync_timezone_with_proxy", existing.get("auto_sync_timezone_with_proxy", False))
+                    auto_sync_loc = data.get("auto_sync_locale_with_proxy", existing.get("auto_sync_locale_with_proxy", False))
+                    auto_sync_geo = data.get("auto_sync_geolocation_with_proxy", existing.get("auto_sync_geolocation_with_proxy", False))
+
+                    if auto_sync_tz and proxy_record.get("timezone"):
+                        data["timezone"] = proxy_record["timezone"]
+                    if auto_sync_loc and proxy_record.get("locale"):
+                        data["locale"] = proxy_record["locale"]
+                    if auto_sync_geo:
+                        data["geoip"] = True
+
         tags = data.pop("tags", None)
         if tags is not None:
             data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
         profile = db.update_profile(profile_id, **data)
-        if not profile:
-            log_error(
+        
+        # Log audit events
+        if requested_lock is True and not currently_locked:
+            log_activity(
                 module="main",
                 action="update_profile",
-                error_code="PROFILE_UPDATE_FAILED",
-                message="Profile not found",
+                status="FINGERPRINT_LOCKED",
+                message=f"Profile {profile['name']} fingerprint locked",
                 profile_id=profile_id,
             )
-            raise HTTPException(status_code=404, detail={"error_code": "PROFILE_UPDATE_FAILED", "message": "Profile not found"})
+        elif requested_lock is False and currently_locked:
+            log_activity(
+                module="main",
+                action="update_profile",
+                status="FINGERPRINT_UNLOCKED",
+                message=f"Profile {profile['name']} fingerprint unlocked",
+                profile_id=profile_id,
+            )
+
+        if proxy_changed:
+            log_activity(
+                module="main",
+                action="update_profile",
+                status="PROXY_CHANGED",
+                message=f"Proxy changed for profile {profile['name']}",
+                profile_id=profile_id,
+            )
+            log_activity(
+                module="main",
+                action="update_profile",
+                status="FINGERPRINT_UNCHANGED_AFTER_PROXY_CHANGE",
+                message=f"Fingerprint unchanged after proxy change for profile {profile['name']}",
+                profile_id=profile_id,
+            )
+
         log_activity(
             module="main",
             action="update_profile",
@@ -799,6 +892,24 @@ async def check_proxy_route(proxy_id: str):
             proxy_id=proxy_id,
         )
         raise HTTPException(status_code=500, detail={"error_code": "PROXY_CHECK_FAILED", "message": "Failed to update proxy record"})
+
+    # Auto-sync profiles using this proxy
+    try:
+        profiles = db.list_profiles()
+        for p in profiles:
+            if p.get("proxy_id") == proxy_id:
+                p_updates = {}
+                if p.get("auto_sync_timezone_with_proxy") and updated_proxy.get("timezone"):
+                    p_updates["timezone"] = updated_proxy["timezone"]
+                if p.get("auto_sync_locale_with_proxy") and updated_proxy.get("locale"):
+                    p_updates["locale"] = updated_proxy["locale"]
+                if p.get("auto_sync_geolocation_with_proxy"):
+                    p_updates["geoip"] = True
+                
+                if p_updates:
+                    db.update_profile(p["id"], **p_updates)
+    except Exception as e:
+        logger.error(f"Error auto-syncing profiles for proxy {proxy_id}: {e}")
         
     log_activity(
         module="main",
@@ -941,6 +1052,235 @@ async def backup_profile_folder(profile_id: str):
         raise HTTPException(status_code=500, detail={"error_code": "BACKUP_FAILED", "message": str(exc)})
 
 
+# ── Profile Package Export/Import ─────────────────────────────────────────────
+
+from pydantic import BaseModel
+import tempfile
+
+REQUIRE_ADMIN_FOR_PROFILE_PACKAGE = os.environ.get("REQUIRE_ADMIN_FOR_PROFILE_PACKAGE", "true").lower() == "true"
+
+class ProfileExportPackageRequest(BaseModel):
+    passphrase: str | None = None
+    include_proxy_secret: bool = False
+
+class ProfileFingerprintLockToggleRequest(BaseModel):
+    fingerprint_locked: bool
+
+@app.post("/api/profiles/{profile_id}/export-package")
+async def export_package_endpoint(profile_id: str, req: ProfileExportPackageRequest, request: Request):
+    # Audit: PROFILE_PACKAGE_EXPORT_REQUESTED
+    log_activity(
+        module="main",
+        action="export_package",
+        status="PROFILE_PACKAGE_EXPORT_REQUESTED",
+        message=f"Profile package export requested for {profile_id}",
+        profile_id=profile_id,
+    )
+
+    # Admin guard check
+    role = request.headers.get("x-user-role", "user").lower()
+    is_admin = role in ("admin", "super_admin")
+    if REQUIRE_ADMIN_FOR_PROFILE_PACKAGE and not is_admin:
+        log_error(
+            module="main",
+            action="export_package",
+            error_code="EXPORT_DENIED_PERMISSION",
+            message="User does not have admin privileges to export a profile.",
+            profile_id=profile_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "EXPORT_DENIED_PERMISSION", "message": "Only admin/super_admin can export profiles."}
+        )
+
+    from backend.database import DATA_DIR
+    exports_dir = DATA_DIR / "exports"
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    dest_path = str(exports_dir / f"profile_{profile_id}.cbprofile")
+
+    try:
+        res = export_profile(
+            browser_mgr=browser_mgr,
+            profile_id=profile_id,
+            dest_path=dest_path,
+            passphrase=req.passphrase,
+            exported_by=role.capitalize(),
+            include_proxy_secret=req.include_proxy_secret,
+        )
+        
+        # Audit: PROFILE_PACKAGE_EXPORTED
+        log_activity(
+            module="main",
+            action="export_package",
+            status="PROFILE_PACKAGE_EXPORTED",
+            message=f"Profile package exported successfully to {dest_path}",
+            profile_id=profile_id,
+        )
+
+        if browser_mgr.is_desktop:
+            return {"export_path": dest_path}
+        else:
+            return FileResponse(dest_path, media_type="application/octet-stream", filename=f"profile_{profile_id}.cbprofile")
+
+    except ProfilePackageError as exc:
+        log_error(
+            module="main",
+            action="export_package",
+            error_code="PROFILE_PACKAGE_EXPORT_FAILED",
+            message=exc.message,
+            profile_id=profile_id,
+        )
+        raise HTTPException(status_code=400, detail={"error_code": exc.code, "message": exc.message})
+    except Exception as exc:
+        log_error(
+            module="main",
+            action="export_package",
+            error_code="PROFILE_PACKAGE_EXPORT_FAILED",
+            message=str(exc),
+            profile_id=profile_id,
+        )
+        raise HTTPException(status_code=500, detail={"error_code": "PROFILE_PACKAGE_EXPORT_FAILED", "message": str(exc)})
+
+@app.post("/api/profiles/import-package")
+async def import_package_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    passphrase: str = Form(None),
+    mode: str = Form("new_profile"),
+    target_profile_id: str = Form(None),
+):
+    # Audit: PROFILE_PACKAGE_IMPORT_REQUESTED
+    log_activity(
+        module="main",
+        action="import_package",
+        status="PROFILE_PACKAGE_IMPORT_REQUESTED",
+        message="Profile package import requested",
+    )
+
+    # Admin guard check
+    role = request.headers.get("x-user-role", "user").lower()
+    is_admin = role in ("admin", "super_admin")
+    if REQUIRE_ADMIN_FOR_PROFILE_PACKAGE and not is_admin:
+        log_error(
+            module="main",
+            action="import_package",
+            error_code="IMPORT_DENIED_PERMISSION",
+            message="User does not have admin privileges to import a profile.",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "IMPORT_DENIED_PERMISSION", "message": "Only admin/super_admin can import profiles."}
+        )
+
+    # Validate mode
+    if mode not in ("new_profile", "overwrite"):
+        log_error(
+            module="main",
+            action="import_package",
+            error_code="PROFILE_PACKAGE_IMPORT_FAILED",
+            message="Invalid import mode. Must be 'new_profile' or 'overwrite'.",
+        )
+        raise HTTPException(status_code=400, detail={"error_code": "PROFILE_PACKAGE_INVALID", "message": "Invalid import mode. Must be 'new_profile' or 'overwrite'."})
+
+    if mode == "overwrite" and not target_profile_id:
+        log_error(
+            module="main",
+            action="import_package",
+            error_code="PROFILE_PACKAGE_IMPORT_FAILED",
+            message="target_profile_id is required when mode is 'overwrite'.",
+        )
+        raise HTTPException(status_code=400, detail={"error_code": "PROFILE_PACKAGE_INVALID", "message": "target_profile_id is required when mode is 'overwrite'."})
+
+    # Save UploadFile to temporary path
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".cbprofile") as tmp:
+        tmp_path = tmp.name
+        try:
+            shutil.copyfileobj(file.file, tmp)
+        except Exception as exc:
+            log_error(
+                module="main",
+                action="import_package",
+                error_code="PROFILE_PACKAGE_IMPORT_FAILED",
+                message=str(exc),
+            )
+            raise HTTPException(status_code=500, detail={"error_code": "IMPORT_FAILED", "message": f"Failed to save upload: {exc}"})
+
+    try:
+        res = import_profile(
+            browser_mgr=browser_mgr,
+            src_path=tmp_path,
+            passphrase=passphrase,
+            overwrite_profile_id=target_profile_id if mode == "overwrite" else None,
+        )
+
+        # Audit: PROFILE_PACKAGE_IMPORTED
+        log_activity(
+            module="main",
+            action="import_package",
+            status="PROFILE_PACKAGE_IMPORTED",
+            message=f"Profile package imported successfully. ID: {res['profile_id']}",
+            profile_id=res["profile_id"],
+        )
+        return res
+
+    except ProfilePackageError as exc:
+        log_error(
+            module="main",
+            action="import_package",
+            error_code="PROFILE_PACKAGE_IMPORT_FAILED",
+            message=exc.message,
+        )
+        raise HTTPException(status_code=400, detail={"error_code": exc.code, "message": exc.message})
+    except Exception as exc:
+        log_error(
+            module="main",
+            action="import_package",
+            error_code="PROFILE_PACKAGE_IMPORT_FAILED",
+            message=str(exc),
+        )
+        raise HTTPException(status_code=500, detail={"error_code": "PROFILE_PACKAGE_IMPORT_FAILED", "message": str(exc)})
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+@app.get("/api/profile-packages")
+async def get_profile_packages_endpoint():
+    from backend.database import DATA_DIR
+    import datetime
+    exports_dir = DATA_DIR / "exports"
+    if not exports_dir.exists():
+        return []
+
+    packages = []
+    for f in exports_dir.glob("*.cbprofile"):
+        stat = f.stat()
+        packages.append({
+            "filename": f.name,
+            "path": str(f),
+            "size_bytes": stat.st_size,
+            "created_at": datetime.datetime.fromtimestamp(stat.st_ctime, datetime.timezone.utc).isoformat()
+        })
+    packages.sort(key=lambda x: x["created_at"], reverse=True)
+    return packages
+
+@app.patch("/api/profiles/{profile_id}/fingerprint-lock")
+async def toggle_fingerprint_lock_endpoint(profile_id: str, req: ProfileFingerprintLockToggleRequest):
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    updated = db.update_profile(profile_id, fingerprint_locked=req.fingerprint_locked)
+    log_activity(
+        module="main",
+        action="toggle_fingerprint_lock",
+        status="success",
+        message=f"Fingerprint lock toggled to {req.fingerprint_locked} for profile {updated['name']}",
+        profile_id=profile_id,
+    )
+    return ProfileResponse(**updated)
+
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/dashboard/summary", response_model=DashboardSummary)
@@ -1040,6 +1380,34 @@ async def skip_cleanup():
     browser_mgr.skip_cleanup = True
     logger.info("skip_cleanup flag set to True in browser_mgr")
     return {"ok": True}
+
+
+@app.post("/api/profiles/{profile_id}/regenerate-fingerprint", response_model=ProfileResponse)
+async def regenerate_fingerprint(profile_id: str, request: Request):
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    role = request.headers.get("x-user-role", "user").lower()
+    if role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Only admin/super_admin can regenerate fingerprint")
+
+    # Generate a new random seed
+    import random
+    new_seed = random.randint(10000, 99999)
+    
+    # Temporarily unlock or directly update DB since the manual regeneration bypasses the locked attribute in DB
+    profile = db.update_profile(profile_id, fingerprint_seed=new_seed)
+
+    log_activity(
+        module="main",
+        action="regenerate_fingerprint",
+        status="FINGERPRINT_REGENERATED_MANUALLY",
+        message=f"Fingerprint regenerated manually for profile {profile['name']} with seed {new_seed}",
+        profile_id=profile_id,
+    )
+
+    return ProfileResponse(**profile)
 
 
 @app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)

@@ -1,5 +1,6 @@
 import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
+import { api } from "../lib/api";
 import type { Profile, ProfileCreateData, Proxy } from "../lib/api";
 
 interface ProfileFormProps {
@@ -56,6 +57,8 @@ const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
 export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: ProfileFormProps) {
   const isEdit = profile !== null;
 
+  const [simulatedRole, setSimulatedRole] = useState(localStorage.getItem("cloak_simulated_role") || "user");
+
   const [form, setForm] = useState<ProfileCreateData>({
     name: "",
     platform: "windows",
@@ -69,6 +72,11 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
     auto_launch: false,
     launch_args: [],
     tags: [],
+    fingerprint_locked: true,
+    session_auto_save: true,
+    auto_sync_timezone_with_proxy: false,
+    auto_sync_locale_with_proxy: false,
+    auto_sync_geolocation_with_proxy: false,
   });
 
   const [saving, setSaving] = useState(false);
@@ -76,6 +84,11 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
   const [tagInput, setTagInput] = useState("");
   const [tagColor, setTagColor] = useState<string | null>("#6366f1");
   const [launchArgInput, setLaunchArgInput] = useState("");
+
+  const handleRoleChange = (role: string) => {
+    localStorage.setItem("cloak_simulated_role", role);
+    setSimulatedRole(role);
+  };
 
   useEffect(() => {
     if (profile) {
@@ -103,6 +116,11 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
         launch_args: profile.launch_args ?? [],
         notes: profile.notes,
         tags: profile.tags ?? [],
+        fingerprint_locked: profile.fingerprint_locked,
+        session_auto_save: profile.session_auto_save,
+        auto_sync_timezone_with_proxy: profile.auto_sync_timezone_with_proxy,
+        auto_sync_locale_with_proxy: profile.auto_sync_locale_with_proxy,
+        auto_sync_geolocation_with_proxy: profile.auto_sync_geolocation_with_proxy,
       });
     }
   }, [profile?.id]);
@@ -175,8 +193,8 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
 
   return (
     <form onSubmit={handleSubmit} className="p-6 max-w-2xl mx-auto w-full h-full overflow-y-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center justify-between mb-6 flex-wrap gap-4">
+        <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold">
             {isEdit ? "Chỉnh sửa Profile" : "Thêm Profile"}
           </h2>
@@ -192,6 +210,21 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
             </button>
           )}
         </div>
+        
+        {/* Simulated Role Selector */}
+        <div className="flex items-center gap-2 bg-surface-3/50 px-3 py-1.5 rounded border border-border/50">
+          <label className="text-[11px] text-gray-400 font-medium">Mô phỏng vai trò:</label>
+          <select
+            value={simulatedRole}
+            onChange={(e) => handleRoleChange(e.target.value)}
+            className="bg-surface-1 border border-border text-xs text-gray-200 px-2 py-0.5 rounded focus:outline-none focus:border-accent"
+          >
+            <option value="user">User (Thường)</option>
+            <option value="admin">Admin</option>
+            <option value="super_admin">Super Admin</option>
+          </select>
+        </div>
+
         <div className="flex items-center gap-2">
           <button type="button" onClick={onCancel} className="btn-secondary">
             Hủy
@@ -231,20 +264,22 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
               </select>
             </div>
             <div>
-              <label className="label">Mã hạt giống vân tay (Seed)</label>
+              <label className="label">Mã hạt giống vân tay (Seed) {form.fingerprint_locked && <span className="text-[10px] text-rose-400 font-semibold">(Locked)</span>}</label>
               <div className="flex gap-2">
                 <input
-                  className="input flex-1 no-spin"
+                  className="input flex-1 no-spin disabled:opacity-50 disabled:bg-surface-2"
                   type="number"
                   value={form.fingerprint_seed ?? ""}
                   onChange={(e) => set("fingerprint_seed", e.target.value ? Number(e.target.value) : null)}
                   placeholder="Tự động (ngẫu nhiên)"
+                  disabled={form.fingerprint_locked}
                 />
                 <button
                   type="button"
                   onClick={randomizeSeed}
-                  className="btn-secondary px-2.5"
-                  title="Ngẫu nhiên hóa hạt giống"
+                  disabled={form.fingerprint_locked}
+                  className="btn-secondary px-2.5 disabled:opacity-30 disabled:cursor-not-allowed"
+                  title={form.fingerprint_locked ? "Mở khóa vân tay để đổi hạt giống" : "Ngẫu nhiên hóa hạt giống"}
                 >
                   <svg className="h-5 w-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
                     {/* Right face - lightest */}
@@ -271,6 +306,26 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
                     <circle cx="24" cy="20" r="0.9" fill="currentColor" opacity="0.5" />
                   </svg>
                 </button>
+                {isEdit && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      if (!confirm("Tạo mới vân tay cho profile này? Hạt giống ngẫu nhiên mới sẽ được tạo.")) return;
+                      try {
+                        const updated = await api.regenerateFingerprint(profile.id);
+                        set("fingerprint_seed", updated.fingerprint_seed);
+                        alert("Đã tạo mới vân tay thành công!");
+                      } catch (err: any) {
+                        alert("Không thể tạo mới vân tay: " + err.message);
+                      }
+                    }}
+                    disabled={simulatedRole !== "admin" && simulatedRole !== "super_admin"}
+                    className="btn-secondary text-[11px] px-2.5 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                    title={simulatedRole !== "admin" && simulatedRole !== "super_admin" ? "Chỉ Admin/Super Admin mới được tạo mới vân tay" : "Tạo mới vân tay"}
+                  >
+                    Regenerate
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -359,6 +414,112 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
               />
               Tự động phát hiện múi giờ/ngôn ngữ từ IP của Proxy (GeoIP)
             </label>
+          </div>
+        </section>
+
+        {/* Identity & Security */}
+        <section className="bg-surface-2/30 p-4 rounded-lg border border-border/50">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Identity & Bảo mật</h3>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="flex items-center gap-2 text-sm text-gray-200 font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.fingerprint_locked ?? true}
+                    onChange={(e) => set("fingerprint_locked", e.target.checked)}
+                    className="rounded border-border bg-surface-2 h-4 w-4 text-accent focus:ring-accent"
+                  />
+                  Khóa vân tay core (Fingerprint Locked)
+                </label>
+                <p className="text-xs text-gray-500 mt-1 ml-6">
+                  Khi bật, ngăn chặn tự động hoặc vô tình thay đổi hạt giống (seed), canvas, WebGL, font, user-agent, kích thước màn hình, v.v.
+                </p>
+              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${form.fingerprint_locked ? "bg-rose-500/10 text-rose-400" : "bg-emerald-500/10 text-emerald-400"}`}>
+                {form.fingerprint_locked ? "ON" : "OFF"}
+              </span>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="flex items-center gap-2 text-sm text-gray-200 font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.session_auto_save ?? true}
+                    onChange={(e) => set("session_auto_save", e.target.checked)}
+                    className="rounded border-border bg-surface-2 h-4 w-4 text-accent focus:ring-accent"
+                  />
+                  Tự động lưu phiên trình duyệt (Session Auto Save)
+                </label>
+                <p className="text-xs text-gray-500 mt-1 ml-6">
+                  Tự động lưu và phục hồi dữ liệu phiên runtime (cookies, tabs, v.v.) khi dừng hoặc tắt profile.
+                </p>
+              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${form.session_auto_save ? "bg-accent/15 text-accent" : "bg-gray-500/20 text-gray-400"}`}>
+                {form.session_auto_save ? "ON" : "OFF"}
+              </span>
+            </div>
+
+            <div className="border-t border-border/40 pt-3">
+              <span className="text-xs font-semibold text-gray-400 block mb-2">Tự động đồng bộ hóa với Proxy:</span>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+                <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.auto_sync_timezone_with_proxy ?? false}
+                    onChange={(e) => set("auto_sync_timezone_with_proxy", e.target.checked)}
+                    className="rounded border-border bg-surface-2"
+                  />
+                  Đồng bộ Múi giờ
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.auto_sync_locale_with_proxy ?? false}
+                    onChange={(e) => set("auto_sync_locale_with_proxy", e.target.checked)}
+                    className="rounded border-border bg-surface-2"
+                  />
+                  Đồng bộ Ngôn ngữ
+                </label>
+                <label className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.auto_sync_geolocation_with_proxy ?? false}
+                    onChange={(e) => set("auto_sync_geolocation_with_proxy", e.target.checked)}
+                    className="rounded border-border bg-surface-2"
+                  />
+                  Đồng bộ Vị trí (Geo)
+                </label>
+              </div>
+            </div>
+
+            {/* Timestamps */}
+            {isEdit && profile && (
+              <>
+                <div className="border-t border-border/40 pt-3 grid grid-cols-3 gap-3 text-[10px] text-gray-500 font-mono">
+                  <div>
+                    <span className="block text-gray-400 font-sans">Lần đổi vân tay cuối:</span>
+                    <span>{profile.last_fingerprint_change_at ? new Date(profile.last_fingerprint_change_at).toLocaleString() : "Chưa có"}</span>
+                  </div>
+                  <div>
+                    <span className="block text-gray-400 font-sans">Lần lưu phiên cuối:</span>
+                    <span>{profile.last_session_save_at ? new Date(profile.last_session_save_at).toLocaleString() : "Chưa có"}</span>
+                  </div>
+                  <div>
+                    <span className="block text-gray-400 font-sans">Lần đổi proxy cuối:</span>
+                    <span>{profile.last_proxy_change_at ? new Date(profile.last_proxy_change_at).toLocaleString() : "Chưa có"}</span>
+                  </div>
+                </div>
+                {profile.last_proxy_change_at && profile.last_fingerprint_change_at &&
+                  new Date(profile.last_proxy_change_at) > new Date(profile.last_fingerprint_change_at) && (
+                    <div className="mt-2 text-[10px] text-amber-400 font-semibold bg-amber-500/10 border border-amber-500/20 px-2 py-1 rounded flex items-center gap-1.5">
+                      <span>⚠️</span>
+                      <span>Proxy changed. Fingerprint unchanged.</span>
+                    </div>
+                )}
+              </>
+            )}
           </div>
         </section>
 

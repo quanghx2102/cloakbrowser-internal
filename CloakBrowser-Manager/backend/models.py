@@ -31,6 +31,11 @@ class ProfileCreate(BaseModel):
     launch_args: list[str] = Field(default_factory=list)
     notes: str | None = None
     tags: list[TagCreate] | None = None
+    fingerprint_locked: bool = True
+    session_auto_save: bool = True
+    auto_sync_timezone_with_proxy: bool = False
+    auto_sync_locale_with_proxy: bool = False
+    auto_sync_geolocation_with_proxy: bool = False
 
 
 class ProfileUpdate(BaseModel):
@@ -57,6 +62,11 @@ class ProfileUpdate(BaseModel):
     launch_args: list[str] | None = None
     notes: str | None = Field(default=None)
     tags: list[TagCreate] | None = None
+    fingerprint_locked: bool | None = None
+    session_auto_save: bool | None = None
+    auto_sync_timezone_with_proxy: bool | None = None
+    auto_sync_locale_with_proxy: bool | None = None
+    auto_sync_geolocation_with_proxy: bool | None = None
 
 
 class TagCreate(BaseModel):
@@ -90,6 +100,14 @@ class ProfileResponse(BaseModel):
     geoip: bool = False
     clipboard_sync: bool = True
     auto_launch: bool = False
+    fingerprint_locked: bool = True
+    session_auto_save: bool = True
+    auto_sync_timezone_with_proxy: bool = False
+    auto_sync_locale_with_proxy: bool = False
+    auto_sync_geolocation_with_proxy: bool = False
+    last_fingerprint_change_at: str | None = None
+    last_session_save_at: str | None = None
+    last_proxy_change_at: str | None = None
 
     @field_validator("clipboard_sync", mode="before")
     @classmethod

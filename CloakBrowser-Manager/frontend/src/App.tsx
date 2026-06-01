@@ -13,6 +13,7 @@ import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { Dashboard } from "./components/Dashboard";
 import { SettingsTab } from "./components/SettingsTab";
+import { ProfilePackageModal } from "./components/ProfilePackageModal";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create_profile" | "edit_profile" | "view_profile" | "logs_profile" | "create_proxy" | "edit_proxy";
@@ -96,7 +97,7 @@ interface AppContentProps {
 }
 
 function AppContent({ authRequired, onLogout }: AppContentProps) {
-  const { profiles, loading: profilesLoading, error: profilesError, create: createProfile, update: updateProfile, remove: removeProfile, launch, stop } = useProfiles();
+  const { profiles, loading: profilesLoading, error: profilesError, create: createProfile, update: updateProfile, remove: removeProfile, launch, stop, refresh: refreshProfiles } = useProfiles();
   const { proxies, loading: proxiesLoading, error: proxiesError, create: createProxy, update: updateProxy, remove: removeProxy, check: checkProxy } = useProxies();
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
@@ -107,6 +108,11 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast, setToast] = useState<Toast>(null);
   const [isDesktop, setIsDesktop] = useState(false);
+
+  // Profile package modal state
+  const [packageModalOpen, setPackageModalOpen] = useState(false);
+  const [packageModalType, setPackageModalType] = useState<"import" | "export">("export");
+  const [packageProfileId, setPackageProfileId] = useState<string | null>(null);
 
   useEffect(() => {
     api.getStatus()
@@ -273,6 +279,25 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     setView("logs_profile");
   }, []);
 
+  const handleExportClick = useCallback((id: string) => {
+    setPackageProfileId(id);
+    setPackageModalType("export");
+    setPackageModalOpen(true);
+  }, []);
+
+  const handleImportClick = useCallback(() => {
+    setPackageProfileId(null);
+    setPackageModalType("import");
+    setPackageModalOpen(true);
+  }, []);
+
+  const handlePackageSuccess = useCallback((message: string, type: "success" | "error") => {
+    showToast(message, type);
+    if (type === "success") {
+      refreshProfiles();
+    }
+  }, [showToast, refreshProfiles]);
+
   if (profilesLoading || proxiesLoading) {
     return (
       <div className="h-screen flex items-center justify-center">
@@ -345,6 +370,8 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               onView={handleViewProfile}
               onEdit={handleEditProfile}
               onLogs={handleLogsProfile}
+              onExportClick={handleExportClick}
+              onImportClick={handleImportClick}
               isDesktop={isDesktop}
             />
           ) : (
@@ -510,6 +537,16 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             />
           )}
         </div>
+
+        {/* Profile Package Modal */}
+        <ProfilePackageModal
+          isOpen={packageModalOpen}
+          onClose={() => setPackageModalOpen(false)}
+          type={packageModalType}
+          profileId={packageProfileId}
+          profiles={profiles}
+          onSuccess={handlePackageSuccess}
+        />
 
         {/* Toast */}
         {toast && (

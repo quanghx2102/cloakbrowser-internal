@@ -9,10 +9,14 @@ import {
   ScrollText,
   Filter,
   Loader2,
+  Download,
+  Upload,
+  Cookie,
 } from "lucide-react";
 import { useState } from "react";
 import type { Profile } from "../lib/api";
 import { StatusIndicator } from "./StatusIndicator";
+import { IdentityLockBadge } from "./IdentityLockBadge";
 
 type StatusFilter = "all" | "running" | "stopped";
 
@@ -26,6 +30,8 @@ interface ProfileListProps {
   onView: (id: string) => void;
   onEdit: (id: string) => void;
   onLogs: (id: string) => void;
+  onExportClick: (id: string) => void;
+  onImportClick: () => void;
   isDesktop?: boolean;
 }
 
@@ -65,11 +71,16 @@ export function ProfileList({
   onView,
   onEdit,
   onLogs,
+  onExportClick,
+  onImportClick,
   isDesktop,
 }: ProfileListProps) {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [loadingId, setLoadingId] = useState<string | null>(null);
+
+  const role = localStorage.getItem("cloak_simulated_role") || "user";
+  const isStaff = role === "staff" || role === "user";
 
   const filtered = profiles.filter((p) => {
     const matchName = p.name.toLowerCase().includes(search.toLowerCase());
@@ -203,13 +214,14 @@ export function ProfileList({
                   >
                     {/* Name */}
                     <td className="px-3 py-2.5">
-                      <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex items-center gap-2 min-w-0 flex-wrap">
                         <span
                           className="font-medium text-gray-100 truncate max-w-[120px]"
                           title={profile.name}
                         >
                           {profile.name}
                         </span>
+                        <IdentityLockBadge locked={profile.fingerprint_locked} />
                       </div>
                       <div className="flex items-center gap-1.5 mt-0.5">
                         <span className="text-[10px] text-gray-500 capitalize">
@@ -334,6 +346,36 @@ export function ProfileList({
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
 
+                        {/* Export Profile */}
+                        {!isStaff && (
+                          <button
+                            id={`btn-export-${profile.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onExportClick(profile.id);
+                            }}
+                            className="p-1 text-accent hover:text-accent-hover hover:bg-accent/10 rounded transition-colors"
+                            title="Export Profile"
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+
+                        {/* Advanced Cookie Tools */}
+                        {role === "super_admin" && (
+                          <button
+                            id={`btn-cookie-${profile.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              alert("Advanced Cookie Tools are currently under development.");
+                            }}
+                            className="p-1 text-purple-400 hover:text-purple-300 hover:bg-purple-500/10 rounded transition-colors"
+                            title="Advanced Cookie Tools (Super Admin)"
+                          >
+                            <Cookie className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+
                         {/* Logs */}
                         <button
                           id={`btn-logs-${profile.id}`}
@@ -356,16 +398,27 @@ export function ProfileList({
         )}
       </div>
 
-      {/* New profile button */}
-      <div className="p-3 border-t border-border flex-shrink-0">
+      {/* New profile and Import buttons */}
+      <div className="p-3 border-t border-border flex-shrink-0 flex gap-2">
         <button
           id="btn-new-profile"
           onClick={onNew}
-          className="btn-secondary w-full flex items-center justify-center gap-1.5"
+          className="btn-secondary flex-1 flex items-center justify-center gap-1.5"
         >
           <Plus className="h-3.5 w-3.5" />
           <span>Thêm Profile</span>
         </button>
+        {!isStaff && (
+          <button
+            id="btn-import-profile"
+            onClick={onImportClick}
+            className="btn-secondary flex-1 flex items-center justify-center gap-1.5 border-dashed border-accent/40 text-accent hover:text-accent-hover hover:border-accent"
+            title="Import Profile package"
+          >
+            <Upload className="h-3.5 w-3.5" />
+            <span>Import Package</span>
+          </button>
+        )}
       </div>
     </div>
   );

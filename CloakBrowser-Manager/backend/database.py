@@ -15,20 +15,26 @@ import os
 import platform
 
 def _get_default_data_dir() -> Path:
-    env_dir = os.environ.get("CLOAK_DATA_DIR")
+    env_dir = os.environ.get("APP_DATA_DIR") or os.environ.get("CLOAK_DATA_DIR")
     if env_dir:
-        return Path(env_dir)
+        path_obj = Path(env_dir).resolve()
+        print(f"[Lifecycle] FastAPI using APP_DATA_DIR: {path_obj}")
+        return path_obj
         
     system = platform.system()
     if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "CloakInternalTool"
+        path_obj = Path.home() / "Library" / "Application Support" / "CloakInternalTool"
     elif system == "Windows":
         app_data = os.environ.get("APPDATA")
         if app_data:
-            return Path(app_data) / "CloakInternalTool"
-        return Path.home() / "AppData" / "Roaming" / "CloakInternalTool"
+            path_obj = Path(app_data) / "CloakInternalTool"
+        else:
+            path_obj = Path.home() / "AppData" / "Roaming" / "CloakInternalTool"
     else:
-        return Path.home() / ".config" / "cloakinternaltool"
+        path_obj = Path.home() / ".config" / "cloakinternaltool"
+        
+    print(f"[Lifecycle] FastAPI using default APP_DATA_DIR: {path_obj}")
+    return path_obj
 
 DATA_DIR = _get_default_data_dir()
 DB_PATH = DATA_DIR / "database" / "profiles.db"
@@ -76,7 +82,15 @@ def init_db():
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                last_launched TEXT
+                last_launched TEXT,
+                fingerprint_locked BOOLEAN DEFAULT 1,
+                session_auto_save BOOLEAN DEFAULT 1,
+                auto_sync_timezone_with_proxy BOOLEAN DEFAULT 0,
+                auto_sync_locale_with_proxy BOOLEAN DEFAULT 0,
+                auto_sync_geolocation_with_proxy BOOLEAN DEFAULT 0,
+                last_fingerprint_change_at TEXT,
+                last_session_save_at TEXT,
+                last_proxy_change_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS profile_tags (
@@ -120,6 +134,7 @@ def init_db():
         """)
         conn.commit()
 
+    with get_db() as conn:
         # Migrations for existing databases
         cols = {row[1] for row in conn.execute("PRAGMA table_info(profiles)").fetchall()}
         if "clipboard_sync" not in cols:
@@ -136,6 +151,30 @@ def init_db():
             conn.commit()
         if "proxy_id" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN proxy_id TEXT REFERENCES proxies(id) ON DELETE SET NULL")
+            conn.commit()
+        if "fingerprint_locked" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN fingerprint_locked BOOLEAN DEFAULT 1")
+            conn.commit()
+        if "session_auto_save" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN session_auto_save BOOLEAN DEFAULT 1")
+            conn.commit()
+        if "auto_sync_timezone_with_proxy" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN auto_sync_timezone_with_proxy BOOLEAN DEFAULT 0")
+            conn.commit()
+        if "auto_sync_locale_with_proxy" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN auto_sync_locale_with_proxy BOOLEAN DEFAULT 0")
+            conn.commit()
+        if "auto_sync_geolocation_with_proxy" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN auto_sync_geolocation_with_proxy BOOLEAN DEFAULT 0")
+            conn.commit()
+        if "last_fingerprint_change_at" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_fingerprint_change_at TEXT")
+            conn.commit()
+        if "last_session_save_at" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_session_save_at TEXT")
+            conn.commit()
+        if "last_proxy_change_at" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_proxy_change_at TEXT")
             conn.commit()
             
         proxy_cols = {row[1] for row in conn.execute("PRAGMA table_info(proxies)").fetchall()}
@@ -172,8 +211,11 @@ def create_profile(
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, launch_args, notes,
-                user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                user_data_dir, created_at, updated_at,
+                fingerprint_locked, session_auto_save,
+                auto_sync_timezone_with_proxy, auto_sync_locale_with_proxy, auto_sync_geolocation_with_proxy,
+                last_fingerprint_change_at, last_session_save_at, last_proxy_change_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -197,6 +239,14 @@ def create_profile(
                 json.dumps(fields.get("launch_args") or []),
                 fields.get("notes"),
                 user_data_dir, now, now,
+                fields.get("fingerprint_locked", True),
+                fields.get("session_auto_save", True),
+                fields.get("auto_sync_timezone_with_proxy", False),
+                fields.get("auto_sync_locale_with_proxy", False),
+                fields.get("auto_sync_geolocation_with_proxy", False),
+                now if fingerprint_seed is not None else None,
+                None,
+                now if (fields.get("proxy") or fields.get("proxy_id")) else None,
             ),
         )
         for t in tags:
@@ -254,11 +304,20 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     if "launch_args" in fields:
         fields["launch_args"] = json.dumps(fields["launch_args"] or [])
 
+    now = _now()
+    if "fingerprint_seed" in fields and fields["fingerprint_seed"] != existing.get("fingerprint_seed"):
+        fields["last_fingerprint_change_at"] = now
+    if ("proxy" in fields and fields["proxy"] != existing.get("proxy")) or ("proxy_id" in fields and fields["proxy_id"] != existing.get("proxy_id")):
+        fields["last_proxy_change_at"] = now
+
     for col in (
         "name", "fingerprint_seed", "proxy", "proxy_id", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "launch_args", "notes",
+        "fingerprint_locked", "session_auto_save",
+        "auto_sync_timezone_with_proxy", "auto_sync_locale_with_proxy", "auto_sync_geolocation_with_proxy",
+        "last_fingerprint_change_at", "last_session_save_at", "last_proxy_change_at",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")

@@ -620,6 +620,15 @@ class BrowserManager:
             if display is not None:
                 await self.vnc.stop_vnc(display)
 
+    def _save_session_timestamp(self, profile_id: str):
+        """Update last_session_save_at timestamp if session_auto_save is enabled."""
+        try:
+            profile = db.get_profile(profile_id)
+            if profile and bool(profile.get("session_auto_save", True)):
+                db.update_profile(profile_id, last_session_save_at=db._now())
+        except Exception as e:
+            logger.warning(f"Failed to update last_session_save_at for profile {profile_id}: {e}")
+
     async def _on_browser_closed(self, profile_id: str):
         """Called when browser exits (crash, user closed via VNC, or stop())."""
         async with self._lock:
@@ -630,6 +639,7 @@ class BrowserManager:
 
         if running:
             # Reached if browser was closed externally (normal close by user or window closed)
+            self._save_session_timestamp(profile_id)
             async with self._lock:
                 self.statuses[profile_id] = "stopped"
             log_activity(
@@ -830,6 +840,7 @@ class BrowserManager:
                     log_activity("browser_manager", "stop_profile", "failed", f"Failed to stop profile {profile_id}", profile_id)
                 return
 
+            self._save_session_timestamp(profile_id)
             async with self._lock:
                 self.statuses[profile_id] = "stopped"
 
