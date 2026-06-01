@@ -317,6 +317,14 @@ async def test_stop_graceful_success():
         mock_context.close.assert_awaited_once()
         assert mgr.statuses["profile1"] == "stopped"
         
+        # Check BROWSER_NATIVE_STOP_REQUESTED was logged
+        mock_log.assert_any_call(
+            module="browser_manager",
+            action="stop_profile",
+            status="BROWSER_NATIVE_STOP_REQUESTED",
+            message="Stop requested for native profile profile1",
+            profile_id="profile1"
+        )
         # Check BROWSER_NATIVE_STOPPED was logged
         mock_log.assert_any_call(
             module="browser_manager",
@@ -355,13 +363,13 @@ async def test_stop_process_non_existent():
         
         # Context close should NOT be called because process is already dead
         mock_context.close.assert_not_called()
-        assert mgr.statuses["profile1"] == "crashed"
+        assert mgr.statuses["profile1"] == "stopped"
         
         mock_log.assert_any_call(
             module="browser_manager",
             action="stop_profile",
-            status="BROWSER_NATIVE_STOP_FAILED",
-            message="Process 12345 for profile profile1 does not exist (already crashed/stopped).",
+            status="BROWSER_NATIVE_STOPPED",
+            message="Process 12345 for profile profile1 is already dead.",
             profile_id="profile1"
         )
 
@@ -406,6 +414,15 @@ async def test_stop_timeout_force_kill():
         # Verify SIGKILL was sent
         mock_kill.assert_any_call(12345, 9)
         assert mgr.statuses["profile1"] == "stopped"
+        
+        # Verify BROWSER_NATIVE_FORCE_KILLED was logged
+        mock_log.assert_any_call(
+            module="browser_manager",
+            action="stop_profile",
+            status="BROWSER_NATIVE_FORCE_KILLED",
+            message="Forcing kill on process 12345 for profile profile1",
+            profile_id="profile1"
+        )
 
 
 @pytest.mark.asyncio
@@ -432,4 +449,30 @@ async def test_restart_flow():
             message="Successfully restarted native profile profile1",
             profile_id="profile1"
         )
+
+
+@pytest.mark.asyncio
+async def test_launch_permission_denied_raises_permission_error():
+    import os
+    from unittest.mock import MagicMock
+    mgr = BrowserManager()
+    mgr.is_desktop = True
+
+    profile = {
+        "id": "profile1",
+        "name": "Profile 1",
+        "user_data_dir": "/tmp/non-existent-user-data-dir"
+    }
+
+    # Set up mocks to simulate resolved but non-executable binary path
+    with patch.dict(os.environ, {"CLOAK_BROWSER_BINARY_PATH": "/tmp/non-executable-bin"}), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("pathlib.Path.is_file", return_value=True), \
+         patch("os.path.realpath", return_value="/tmp/non-executable-bin"), \
+         patch("platform.system", return_value="Linux"), \
+         patch("os.access", return_value=False), \
+         patch("os.chmod", side_effect=OSError("Permission Denied")):
+         
+         with pytest.raises(PermissionError, match="CLOAK_BROWSER_BINARY_PERMISSION_DENIED"):
+             await mgr.launch(profile)
 

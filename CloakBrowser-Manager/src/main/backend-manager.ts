@@ -98,38 +98,48 @@ export class BackendManager {
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
   }
 
+  private validateBinaryPath(candidatePath: string): { isValid: boolean; errorCode?: string } {
+    if (!fs.existsSync(candidatePath)) {
+      return { isValid: false, errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+    }
+    try {
+      const stat = fs.statSync(candidatePath);
+      if (stat.isDirectory()) {
+        return { isValid: false, errorCode: 'CLOAK_BROWSER_BINARY_INVALID' };
+      }
+    } catch (e) {
+      return { isValid: false, errorCode: 'CLOAK_BROWSER_BINARY_INVALID' };
+    }
+    if (process.platform !== 'win32') {
+      try {
+        fs.accessSync(candidatePath, fs.constants.X_OK);
+      } catch (err) {
+        return { isValid: false, errorCode: 'CLOAK_BROWSER_BINARY_INVALID' };
+      }
+    }
+    return { isValid: true };
+  }
+
   public resolveBinaryPath(): { path: string | null; status: 'Ready' | 'Missing' | 'Invalid'; errorCode?: string } {
     // 1. Env override for dev/debug
     let binaryPath = process.env.CLOAK_BROWSER_BINARY_PATH || process.env.CLOAKBROWSER_BINARY_PATH || null;
     if (binaryPath) {
-      if (fs.existsSync(binaryPath)) {
-        if (process.platform !== 'win32') {
-          try {
-            fs.accessSync(binaryPath, fs.constants.X_OK);
-          } catch (err) {
-            return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
-          }
-        }
+      const validation = this.validateBinaryPath(binaryPath);
+      if (validation.isValid) {
         return { path: binaryPath, status: 'Ready' };
       } else {
-        return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+        return { path: binaryPath, status: 'Invalid', errorCode: validation.errorCode };
       }
     }
 
     // 2. Config saved in app-config.json
     binaryPath = this.getSavedBinaryPath();
     if (binaryPath) {
-      if (fs.existsSync(binaryPath)) {
-        if (process.platform !== 'win32') {
-          try {
-            fs.accessSync(binaryPath, fs.constants.X_OK);
-          } catch (err) {
-            return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
-          }
-        }
+      const validation = this.validateBinaryPath(binaryPath);
+      if (validation.isValid) {
         return { path: binaryPath, status: 'Ready' };
       } else {
-        return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+        return { path: binaryPath, status: 'Invalid', errorCode: validation.errorCode };
       }
     }
 
@@ -142,7 +152,8 @@ export class BackendManager {
           for (const file of files) {
             if (file.startsWith('chromium-')) {
               const candidate = path.join(baseDir, file, 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
-              if (fs.existsSync(candidate)) {
+              const validation = this.validateBinaryPath(candidate);
+              if (validation.isValid) {
                 return { path: candidate, status: 'Ready' };
               }
             }
@@ -154,14 +165,45 @@ export class BackendManager {
     }
 
     // 4. Bundled binary in app resources if available
-    const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
-    let bundledBrowserPath = path.join(process.resourcesPath, 'binaries', browserBinName);
-    if (fs.existsSync(bundledBrowserPath)) {
-      return { path: bundledBrowserPath, status: 'Ready' };
+    const candidates: string[] = [];
+    const basePaths = [
+      process.resourcesPath,
+      app.getAppPath(),
+      path.join(app.getAppPath(), 'resources')
+    ];
+
+    for (const base of basePaths) {
+      if (!base) continue;
+
+      const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
+      candidates.push(path.join(base, 'binaries', browserBinName));
+
+      if (process.platform === 'darwin') {
+        candidates.push(path.join(base, 'binaries', 'Chromium.app', 'Contents', 'MacOS', 'Chromium'));
+
+        const binariesDir = path.join(base, 'binaries');
+        if (fs.existsSync(binariesDir)) {
+          try {
+            const files = fs.readdirSync(binariesDir);
+            for (const file of files) {
+              if (file.startsWith('chromium-')) {
+                candidates.push(path.join(binariesDir, file, 'Chromium.app', 'Contents', 'MacOS', 'Chromium'));
+              }
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
     }
-    bundledBrowserPath = path.join(app.getAppPath(), 'binaries', browserBinName);
-    if (fs.existsSync(bundledBrowserPath)) {
-      return { path: bundledBrowserPath, status: 'Ready' };
+
+    // Deduplicate candidates and check them in order
+    const uniqueCandidates = Array.from(new Set(candidates));
+    for (const candidate of uniqueCandidates) {
+      const validation = this.validateBinaryPath(candidate);
+      if (validation.isValid) {
+        return { path: candidate, status: 'Ready' };
+      }
     }
 
     return { path: null, status: 'Missing', errorCode: 'CLOAK_BROWSER_BINARY_NOT_CONFIGURED' };
@@ -217,16 +259,26 @@ export class BackendManager {
 
     this.process = spawn(command, args, { env, cwd: app.getAppPath() });
 
+    const logFilePath = path.join(this.dataDir, 'logs', 'backend.log');
+    const logStream = fs.createWriteStream(logFilePath, { flags: 'a' });
+
     this.process.stdout?.on('data', (data) => {
-      console.log(`[FastAPI stdout]: ${data.toString().trim()}`);
+      const msg = `[FastAPI stdout]: ${data.toString().trim()}`;
+      console.log(msg);
+      logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
     });
 
     this.process.stderr?.on('data', (data) => {
-      console.error(`[FastAPI stderr]: ${data.toString().trim()}`);
+      const msg = `[FastAPI stderr]: ${data.toString().trim()}`;
+      console.error(msg);
+      logStream.write(`[${new Date().toISOString()}] ${msg}\n`);
     });
 
     this.process.on('close', (code) => {
-      console.log(`FastAPI backend process exited with code ${code}`);
+      const msg = `FastAPI backend process exited with code ${code}`;
+      console.log(msg);
+      logStream.write(`[${new Date().toISOString()}] [Lifecycle] ${msg}\n`);
+      logStream.end();
       this.process = null;
     });
 

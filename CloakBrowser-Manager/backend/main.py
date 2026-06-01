@@ -1062,6 +1062,12 @@ async def launch_profile(profile_id: str):
             clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_CONFIGURED: ", "")
             raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_CONFIGURED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to launch browser")
+    except PermissionError as exc:
+        err_msg = str(exc)
+        if "CLOAK_BROWSER_BINARY_PERMISSION_DENIED" in err_msg:
+            clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_PERMISSION_DENIED: ", "")
+            raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_PERMISSION_DENIED", "message": clean_msg})
+        raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_PERMISSION_DENIED", "message": err_msg})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
@@ -1120,6 +1126,12 @@ async def restart_profile(profile_id: str):
             clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_CONFIGURED: ", "")
             raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_CONFIGURED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to restart browser")
+    except PermissionError as exc:
+        err_msg = str(exc)
+        if "CLOAK_BROWSER_BINARY_PERMISSION_DENIED" in err_msg:
+            clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_PERMISSION_DENIED: ", "")
+            raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_PERMISSION_DENIED", "message": clean_msg})
+        raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_PERMISSION_DENIED", "message": err_msg})
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:

@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import socket
 import time
 from dataclasses import dataclass
@@ -199,6 +200,7 @@ class BrowserManager:
     async def launch(self, profile: dict[str, Any]) -> RunningProfile:
         """Launch a browser instance for the given profile."""
         profile_id = profile["id"]
+        profile_name = profile.get("name") or "unknown"
 
         async with self._lock:
             current_status = self.statuses.get(profile_id)
@@ -292,10 +294,6 @@ class BrowserManager:
             if proxy:
                 _validate_proxy(proxy)
 
-            import platform
-            from pathlib import Path
-            import json
-
             binary_path = None
             path_configured = False
 
@@ -377,9 +375,30 @@ class BrowserManager:
                         os.chmod(binary_path, 0o755)
                     except Exception as e:
                         logger.warning(f"Failed to set executable permissions on {binary_path}: {e}")
+                    if not os.access(binary_path, os.X_OK):
+                        raise PermissionError(f"CLOAK_BROWSER_BINARY_PERMISSION_DENIED: Binary at '{binary_path}' does not have execute permission.")
 
             os.environ["CLOAKBROWSER_BINARY_PATH"] = binary_path
             logger.info(f"Using validated CloakBrowser binary: {binary_path}")
+
+            # Log launch request details clearly (with sanitized proxy)
+            proxy_log_status = "no"
+            if proxy:
+                from urllib.parse import urlparse
+                try:
+                    parsed = urlparse(proxy)
+                    port_str = f":{parsed.port}" if parsed.port else ""
+                    proxy_log_status = f"yes ({parsed.scheme}://{parsed.hostname}{port_str})"
+                except Exception:
+                    proxy_log_status = "yes"
+
+            logger.info(
+                f"[Launch Profile] Initiating native launch. "
+                f"ID: {profile_id}, Name: {profile_name}, "
+                f"Binary Path: {binary_path}, "
+                f"User Data Dir: {profile['user_data_dir']}, "
+                f"Proxy: {proxy_log_status}"
+            )
 
             env_args = {**os.environ}
             if not self.is_desktop and display is not None:
@@ -414,15 +433,30 @@ class BrowserManager:
                 if user_agent := (profile.get("user_agent") or None):
                     chrome_args.append(f"--user-agent={user_agent}")
 
+                # Resolve log path for native browser
+                browser_log_fd = None
+                data_dir = os.environ.get("CLOAK_DATA_DIR")
+                if data_dir:
+                    try:
+                        browser_log_dir = Path(data_dir) / "logs" / "browser"
+                        browser_log_dir.mkdir(parents=True, exist_ok=True)
+                        browser_log_path = browser_log_dir / f"profile_{profile_id}.log"
+                        browser_log_fd = open(browser_log_path, "a", encoding="utf-8")
+                    except Exception as log_err:
+                        logger.warning(f"Failed to create/open browser log file: {log_err}")
+
                 # Launch native subprocess
                 process = await asyncio.create_subprocess_exec(
                     binary_path,
                     *chrome_args,
                     env=env_args,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.DEVNULL,
+                    stdout=browser_log_fd if browser_log_fd else asyncio.subprocess.DEVNULL,
+                    stderr=browser_log_fd if browser_log_fd else asyncio.subprocess.DEVNULL,
                 )
                 pid = process.pid
+
+                if browser_log_fd:
+                    browser_log_fd.close()
 
                 running = RunningProfile(
                     profile_id=profile_id,
@@ -516,7 +550,6 @@ class BrowserManager:
                     else:
                         if running.pid:
                             try:
-                                import platform
                                 if platform.system() == "Windows":
                                     import subprocess
                                     subprocess.run(["taskkill", "/PID", str(running.pid)], capture_output=True, text=True)
@@ -532,6 +565,10 @@ class BrowserManager:
 
             duration = int((time.monotonic() - start_time) * 1000)
             if self.is_desktop:
+                logger.info(
+                    f"[Launch Profile Success] Profile: {profile_id}, "
+                    f"Name: {profile_name}, PID: {pid or 'unknown'}"
+                )
                 log_activity(
                     module="browser_manager",
                     action="launch_profile",
@@ -556,6 +593,10 @@ class BrowserManager:
             async with self._lock:
                 if self.statuses.get(profile_id) not in ("stopped", "stopping"):
                     self.statuses[profile_id] = "failed"
+            logger.error(
+                f"[Launch Profile Failed] Profile: {profile_id}, "
+                f"Name: {profile_name}, Error: {exc}"
+            )
             if self.is_desktop:
                 log_error(
                     module="browser_manager",
@@ -564,6 +605,8 @@ class BrowserManager:
                     message=f"Failed to launch native browser {profile_id}: {exc}",
                     profile_id=profile_id,
                 )
+                if isinstance(exc, PermissionError):
+                    raise exc
                 raise RuntimeError(f"BROWSER_NATIVE_START_FAILED: Failed to launch native browser: {exc}")
             else:
                 log_error(
@@ -601,6 +644,15 @@ class BrowserManager:
 
     async def stop(self, profile_id: str):
         """Stop a running browser instance."""
+        if self.is_desktop:
+            log_activity(
+                module="browser_manager",
+                action="stop_profile",
+                status="BROWSER_NATIVE_STOP_REQUESTED",
+                message=f"Stop requested for native profile {profile_id}",
+                profile_id=profile_id,
+            )
+
         async with self._lock:
             running = self.running.pop(profile_id, None)
             current_status = self.statuses.get(profile_id)
@@ -608,13 +660,34 @@ class BrowserManager:
                 if current_status == "starting":
                     self.statuses[profile_id] = "stopped"
                     log_activity("browser_manager", "stop_profile", "success", f"Cancelled starting profile {profile_id}", profile_id)
+                elif self.is_desktop:
+                    self.statuses[profile_id] = "stopped"
+                    log_activity(
+                        module="browser_manager",
+                        action="stop_profile",
+                        status="BROWSER_NATIVE_STOPPED",
+                        message=f"Native profile {profile_id} was already stopped.",
+                        profile_id=profile_id,
+                    )
                 return
             self.statuses[profile_id] = "stopping"
 
-        log_activity("browser_manager", "stop_profile", "stopping", f"Stopping profile {profile_id}", profile_id)
+        if not self.is_desktop:
+            log_activity("browser_manager", "stop_profile", "stopping", f"Stopping profile {profile_id}", profile_id)
 
         try:
-            # 1. Check if process exists/is alive
+            # 1. Resolve PID if not already done
+            if running.pid is None:
+                try:
+                    import subprocess
+                    out = subprocess.check_output(["pgrep", "-f", f"--remote-debugging-port={running.cdp_port}"])
+                    lines = out.decode().strip().split('\n')
+                    if lines and lines[0]:
+                        running.pid = int(lines[0])
+                except Exception:
+                    pass
+
+            # 2. Check if process exists/is alive
             process_alive = False
             if running.pid:
                 try:
@@ -625,23 +698,24 @@ class BrowserManager:
 
             if running.pid and not process_alive:
                 async with self._lock:
-                    self.statuses[profile_id] = "crashed"
+                    self.statuses[profile_id] = "stopped"
                 if self.is_desktop:
                     log_activity(
                         module="browser_manager",
                         action="stop_profile",
-                        status="BROWSER_NATIVE_STOP_FAILED",
-                        message=f"Process {running.pid} for profile {profile_id} does not exist (already crashed/stopped).",
+                        status="BROWSER_NATIVE_STOPPED",
+                        message=f"Process {running.pid} for profile {profile_id} is already dead.",
                         profile_id=profile_id,
                     )
                 else:
-                    log_activity("browser_manager", "stop_profile", "failed", f"Process {running.pid} does not exist", profile_id)
+                    log_activity("browser_manager", "stop_profile", "success", f"Process {running.pid} does not exist", profile_id)
                 if running.display is not None:
                     await self.vnc.stop_vnc(running.display)
                 return
 
-            # 2. Try graceful stop
+            # 3. Try graceful stop
             graceful_success = False
+            sent_sigterm = False
             if running.context is not None:
                 try:
                     await asyncio.wait_for(running.context.close(), timeout=5.0)
@@ -662,28 +736,44 @@ class BrowserManager:
                         if platform.system() == "Windows":
                             import subprocess
                             subprocess.run(["taskkill", "/PID", str(running.pid)], capture_output=True, text=True)
+                            sent_sigterm = True
                         else:
                             os.kill(running.pid, 15)  # SIGTERM
+                            sent_sigterm = True
                         graceful_success = True
                     except OSError:
                         pass
 
-            # 3. Wait briefly for process to exit
+            # 4. Wait 3-5 seconds (we will check for up to 4.0 seconds, checking every 0.2s)
             if graceful_success and running.pid:
-                for _ in range(30):
+                for _ in range(20):  # 20 * 0.2 = 4.0 seconds
                     try:
                         os.kill(running.pid, 0)
-                        await asyncio.sleep(0.1)
+                        await asyncio.sleep(0.2)
                     except OSError:
                         process_alive = False
                         break
 
-            # 4. Force kill if still alive
+            # 5. Force kill if still alive
             if process_alive and running.pid:
-                logger.info("Forcing kill on process %d for profile %s", running.pid, profile_id)
+                if self.is_desktop:
+                    log_activity(
+                        module="browser_manager",
+                        action="stop_profile",
+                        status="BROWSER_NATIVE_FORCE_KILLED",
+                        message=f"Forcing kill on process {running.pid} for profile {profile_id}",
+                        profile_id=profile_id,
+                    )
+                else:
+                    logger.info("Forcing kill on process %d for profile %s", running.pid, profile_id)
                 try:
-                    os.kill(running.pid, 9)  # SIGKILL
-                    # Wait briefly to let OS clean it up
+                    import platform
+                    if platform.system() == "Windows":
+                        import subprocess
+                        subprocess.run(["taskkill", "/F", "/PID", str(running.pid)], capture_output=True, text=True)
+                    else:
+                        os.kill(running.pid, 9)  # SIGKILL
+                    # Wait briefly to let OS clean it up (up to 1.0 second)
                     for _ in range(10):
                         try:
                             os.kill(running.pid, 0)
@@ -692,14 +782,15 @@ class BrowserManager:
                             process_alive = False
                             break
                     # Reap to prevent zombies if it's a direct child
-                    try:
-                        os.waitpid(running.pid, os.WNOHANG)
-                    except ChildProcessError:
-                        pass
+                    if platform.system() != "Windows":
+                        try:
+                            os.waitpid(running.pid, os.WNOHANG)
+                        except ChildProcessError:
+                            pass
                 except OSError as e:
                     logger.warning("Failed to kill process %d: %s", running.pid, e)
 
-            # 5. Fallback for non-PID cases or if still somehow alive
+            # 6. Fallback for non-PID cases or if still somehow alive
             if process_alive or not running.pid:
                 import subprocess
                 try:
@@ -715,7 +806,7 @@ class BrowserManager:
             if running.display is not None:
                 await self.vnc.stop_vnc(running.display)
 
-            # 6. Verify process liveness one last time
+            # 7. Verify process liveness one last time
             still_alive = False
             if process_alive and running.pid:
                 try:
@@ -743,6 +834,14 @@ class BrowserManager:
                 self.statuses[profile_id] = "stopped"
 
             if self.is_desktop:
+                if sent_sigterm and not process_alive:
+                    log_activity(
+                        module="browser_manager",
+                        action="stop_profile",
+                        status="BROWSER_NATIVE_TERMINATED",
+                        message=f"Successfully terminated native profile {profile_id} with SIGTERM/terminate",
+                        profile_id=profile_id,
+                    )
                 log_activity(
                     module="browser_manager",
                     action="stop_profile",

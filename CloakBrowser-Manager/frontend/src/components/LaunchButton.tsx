@@ -23,8 +23,14 @@ export function LaunchButton({ status, onLaunch, onStop, isDesktop }: LaunchButt
       }
     } catch (err) {
       let msg = err instanceof Error ? err.message : "Thao tác thất bại";
-      if (msg.includes("CLOAK_BROWSER_BINARY_NOT_FOUND") || msg.includes("CloakBrowser binary not found")) {
-        msg = "Lỗi: Không tìm thấy file thực thi CloakBrowser. Vui lòng cấu hình CLOAK_BROWSER_BINARY_PATH hoặc sao chép binary vào thư mục browsers.";
+      if (msg.includes("CLOAK_BROWSER_BINARY_NOT_CONFIGURED")) {
+        msg = "Chưa cấu hình binary. Vui lòng cấu hình CLOAK_BROWSER_BINARY_PATH trong phần Cài đặt.";
+      } else if (msg.includes("CLOAK_BROWSER_BINARY_NOT_FOUND") || msg.includes("CloakBrowser binary not found")) {
+        msg = "Binary không tồn tại ở đường dẫn cấu hình.";
+      } else if (msg.includes("CLOAK_BROWSER_BINARY_PERMISSION_DENIED")) {
+        msg = "Binary không có quyền execute (Quyền thực thi bị từ chối).";
+      } else if (msg.includes("BROWSER_NATIVE_START_FAILED") || msg.includes("BROWSER_START_FAILED") || msg.includes("Failed to launch")) {
+        msg = "Launch failed. Không thể khởi chạy trình duyệt.";
       }
       setError(msg);
       console.error("Action failed:", err);

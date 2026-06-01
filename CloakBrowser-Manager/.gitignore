@@ -24,3 +24,9 @@ CLAUDE.md
 publish-docker.sh
 .beads
 debug
+
+# Local Env Files
+.env
+.env.local
+**/.env
+**/.env.local

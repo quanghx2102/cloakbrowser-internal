@@ -123,6 +123,106 @@ if (!gotTheLock) {
     console.error('Unhandled Rejection in Electron main process:', reason);
   });
 
+  async function createErrorWindow() {
+    mainWindow = new BrowserWindow({
+      width: 800,
+      height: 600,
+      title: 'Lỗi Khởi Động Backend',
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+
+    const errorHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Lỗi Khởi Động Backend</title>
+      <style>
+        body {
+          background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+          color: #f1f5f9;
+          font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          margin: 0;
+          padding: 0;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          min-height: 100vh;
+        }
+        .card {
+          background: rgba(30, 41, 59, 0.7);
+          backdrop-filter: blur(16px);
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 16px;
+          padding: 40px;
+          max-width: 600px;
+          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+          text-align: center;
+          animation: fadeIn 0.6s ease-out;
+        }
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .icon {
+          font-size: 64px;
+          color: #ef4444;
+          margin-bottom: 24px;
+        }
+        h1 {
+          font-size: 24px;
+          margin-bottom: 16px;
+          font-weight: 700;
+          background: linear-gradient(to right, #f43f5e, #fb7185);
+          -webkit-background-clip: text;
+          -webkit-text-fill-color: transparent;
+        }
+        p {
+          font-size: 16px;
+          line-height: 1.6;
+          color: #cbd5e1;
+          margin-bottom: 24px;
+        }
+        .btn {
+          background: linear-gradient(90deg, #6366f1 0%, #4f46e5 100%);
+          color: white;
+          border: none;
+          padding: 12px 28px;
+          font-size: 15px;
+          font-weight: 600;
+          border-radius: 8px;
+          cursor: pointer;
+          transition: all 0.3s;
+          box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+        }
+        .btn:hover {
+          background: linear-gradient(90deg, #4f46e5 0%, #3730a3 100%);
+          transform: translateY(-2px);
+          box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
+        }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <div class="icon">⚠️</div>
+        <h1>Lỗi Khởi Động Backend</h1>
+        <p>Local FastAPI Backend Server không thể khởi chạy hoặc không phản hồi sau healthcheck. Vui lòng đảm bảo các cổng kết nối từ 8080-8180 không bị xung đột, các thư mục quyền dữ liệu hợp lệ và python3 đã được cài đặt đầy đủ các dependency (pip install -r backend/requirements.txt).</p>
+        <button class="btn" onclick="window.close()">Thoát Ứng Dụng</button>
+      </div>
+    </body>
+    </html>`;
+
+    mainWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(errorHtml));
+
+    mainWindow.on('closed', () => {
+      mainWindow = null;
+      app.quit();
+    });
+  }
+
   app.on('ready', async () => {
     // Initialize the desktop logger as soon as logs directory is created/available
     const logsDir = path.join(backendManager.getDataDir(), 'logs');
@@ -149,23 +249,8 @@ if (!gotTheLock) {
     if (success) {
       createWindow(port);
     } else {
-      console.error('Failed to start backend. Exiting application.');
-      // Wait, dialog.showErrorBox was already shown inside backend-manager.ts start method if missing binary!
-      // So if start failed and it wasn't a missing binary (e.g. timeout or python missing), show the backend boot fail dialog:
-      const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
-      let bundledBrowserPath = path.join(process.resourcesPath, 'binaries', browserBinName);
-      if (!fs.existsSync(bundledBrowserPath)) {
-        bundledBrowserPath = path.join(app.getAppPath(), 'binaries', browserBinName);
-      }
-      const binaryPath = process.env.CLOAK_BROWSER_BINARY_PATH || bundledBrowserPath;
-
-      if (fs.existsSync(binaryPath)) {
-        dialog.showErrorBox(
-          'Lỗi khởi động Backend',
-          'Không thể khởi động FastAPI Backend cục bộ. Vui lòng đảm bảo các dependency Python đã được cài đặt đầy đủ hoặc cài đặt lại ứng dụng.'
-        );
-      }
-      app.quit();
+      console.error('Failed to start backend. Displaying error window.');
+      createErrorWindow();
     }
   });
 

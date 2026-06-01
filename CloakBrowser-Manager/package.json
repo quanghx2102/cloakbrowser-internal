@@ -30,6 +30,7 @@
   "build": {
     "appId": "com.cloakbrowser.manager",
     "productName": "CloakBrowser Manager",
+    "publish": null,
     "directories": {
       "output": "release/${version}"
     },
