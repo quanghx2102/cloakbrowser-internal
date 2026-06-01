@@ -1,0 +1,206 @@
+import { spawn, ChildProcess } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import axios from 'axios';
+import { app, dialog } from 'electron';
+
+export class BackendManager {
+  private process: ChildProcess | null = null;
+  private port: number = 8080;
+  private dataDir: string = '';
+
+  constructor() {
+    this.resolveDataDir();
+  }
+
+  private resolveDataDir() {
+    const appName = 'CloakInternalTool';
+    const oldAppName = 'CloakBrowserManager';
+    let oldDataDir = '';
+
+    if (process.platform === 'darwin') {
+      this.dataDir = path.join(app.getPath('home'), 'Library', 'Application Support', appName);
+      oldDataDir = path.join(app.getPath('home'), 'Library', 'Application Support', oldAppName);
+    } else if (process.platform === 'win32') {
+      this.dataDir = path.join(process.env.APPDATA || app.getPath('home'), appName);
+      oldDataDir = path.join(process.env.APPDATA || app.getPath('home'), oldAppName);
+    } else {
+      this.dataDir = path.join(app.getPath('home'), '.config', appName.toLowerCase());
+      oldDataDir = path.join(app.getPath('home'), '.config', oldAppName.toLowerCase());
+    }
+
+    // Migration logic from old app name directory to new directory
+    if (fs.existsSync(oldDataDir) && !fs.existsSync(this.dataDir)) {
+      console.log(`Migrating existing data from ${oldDataDir} to ${this.dataDir}...`);
+      try {
+        fs.cpSync(oldDataDir, this.dataDir, { recursive: true });
+        console.log('Migration successful!');
+
+        // Also move profiles.db to the database/ subfolder if it is at the root of the migrated folder
+        const oldDbPath = path.join(this.dataDir, 'profiles.db');
+        const newDbDir = path.join(this.dataDir, 'database');
+        if (!fs.existsSync(newDbDir)) {
+          fs.mkdirSync(newDbDir, { recursive: true });
+        }
+        const newDbPath = path.join(newDbDir, 'profiles.db');
+        if (fs.existsSync(oldDbPath) && !fs.existsSync(newDbPath)) {
+          fs.renameSync(oldDbPath, newDbPath);
+          console.log('Moved database file to database/ profiles.db subfolder.');
+        }
+      } catch (err) {
+        console.error('Migration failed:', err);
+      }
+    }
+
+    if (!fs.existsSync(this.dataDir)) {
+      fs.mkdirSync(this.dataDir, { recursive: true });
+    }
+
+    // Create standard subdirectories
+    const subDirs = ['profiles', 'database', 'logs', 'backups', 'config', 'browsers'];
+    for (const subDir of subDirs) {
+      const fullPath = path.join(this.dataDir, subDir);
+      if (!fs.existsSync(fullPath)) {
+        fs.mkdirSync(fullPath, { recursive: true });
+      }
+    }
+  }
+
+  public getPort(): number {
+    return this.port;
+  }
+
+  public getDataDir(): string {
+    return this.dataDir;
+  }
+
+  public async start(port: number): Promise<boolean> {
+    this.port = port;
+    const isDev = !app.isPackaged;
+
+    let command = '';
+    let args: string[] = [];
+
+    const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
+    let bundledBrowserPath = path.join(process.resourcesPath, 'binaries', browserBinName);
+    if (!fs.existsSync(bundledBrowserPath)) {
+      bundledBrowserPath = path.join(app.getAppPath(), 'binaries', browserBinName);
+    }
+
+    const binaryPath = process.env.CLOAK_BROWSER_BINARY_PATH || bundledBrowserPath;
+
+    // Log data path and binary path
+    console.log(`[Lifecycle] APP_DATA_DIR: ${this.dataDir}`);
+    console.log(`[Lifecycle] CLOAK_BROWSER_BINARY_PATH: ${binaryPath}`);
+
+    // Validate CloakBrowser Binary exists
+    if (!fs.existsSync(binaryPath)) {
+      console.error(`[Error] CLOAK_BROWSER_BINARY_NOT_FOUND: CloakBrowser binary not found at ${binaryPath}`);
+      dialog.showErrorBox(
+        'Không tìm thấy CloakBrowser Binary',
+        `Ứng dụng không tìm thấy file chạy CloakBrowser tại đường dẫn:\n${binaryPath}\n\nVui lòng cấu hình biến môi trường CLOAK_BROWSER_BINARY_PATH hoặc đặt file chạy vào thư mục browsers.`
+      );
+      return false;
+    }
+
+    const env = {
+      ...process.env,
+      CLOAK_DESKTOP: '1',
+      CLOAK_DATA_DIR: this.dataDir,
+      PORT: this.port.toString(),
+      CLOAK_BROWSER_BINARY_PATH: binaryPath,
+    };
+
+    if (isDev) {
+      // In development, run using uvicorn module to allow correct relative imports in backend package
+      command = 'python3';
+      args = ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', this.port.toString(), '--log-level', 'info'];
+    } else {
+      // In production, run the packaged binary inside extraResources
+      const binaryName = process.platform === 'win32' ? 'backend.exe' : 'backend';
+      command = path.join(process.resourcesPath, 'binaries', binaryName);
+      args = ['--port', this.port.toString()];
+
+      if (!fs.existsSync(command)) {
+        console.error(`Backend binary not found at: ${command}. Falling back to default app directory.`);
+        command = path.join(app.getAppPath(), 'backend', 'dist', binaryName);
+      }
+    }
+
+    console.log(`Starting backend with command: ${command} ${args.join(' ')}`);
+
+    this.process = spawn(command, args, { env, cwd: app.getAppPath() });
+
+    this.process.stdout?.on('data', (data) => {
+      console.log(`[FastAPI stdout]: ${data.toString().trim()}`);
+    });
+
+    this.process.stderr?.on('data', (data) => {
+      console.error(`[FastAPI stderr]: ${data.toString().trim()}`);
+    });
+
+    this.process.on('close', (code) => {
+      console.log(`FastAPI backend process exited with code ${code}`);
+      this.process = null;
+    });
+
+    // Wait for the backend to start and respond to status ping
+    return await this.waitForBackend();
+  }
+
+  private async waitForBackend(retries = 30, delayMs = 500): Promise<boolean> {
+    const statusUrl = `http://127.0.0.1:${this.port}/api/status`;
+    console.log(`Waiting for backend to be ready at ${statusUrl}...`);
+
+    for (let i = 0; i < retries; i++) {
+      try {
+        const response = await axios.get(statusUrl, { timeout: 1000 });
+        if (response.status === 200) {
+          console.log('FastAPI backend is ready!');
+          return true;
+        }
+      } catch (err: any) {
+        if (i === retries - 1) {
+          console.error(`FastAPI backend health check failed at retry ${i + 1}/${retries}: ${err.message || err}`);
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    console.error('FastAPI backend startup timed out.');
+    return false;
+  }
+
+  public async stop(cleanupProfiles: boolean = true) {
+    if (!this.process) return;
+
+    console.log('Stopping FastAPI backend process...');
+    
+    // Handle profile cleanup settings before stopping backend
+    if (cleanupProfiles) {
+      try {
+        await axios.post(`http://127.0.0.1:${this.port}/api/profiles/stop-all`, {}, { timeout: 3000 });
+        console.log('Successfully requested profile cleanup.');
+      } catch (e) {
+        console.warn('Failed to call stop-all API gracefully before killing backend.');
+      }
+    } else {
+      try {
+        await axios.post(`http://127.0.0.1:${this.port}/api/profiles/skip-cleanup`, {}, { timeout: 3000 });
+        console.log('Successfully requested skip-cleanup from backend.');
+      } catch (e) {
+        console.warn('Failed to call skip-cleanup API before killing backend.');
+      }
+    }
+
+    // Kill the backend process
+    this.process.kill('SIGINT');
+    
+    // Wait a brief moment, then force kill if still alive
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    if (this.process) {
+      this.process.kill('SIGKILL');
+      this.process = null;
+    }
+  }
+}
