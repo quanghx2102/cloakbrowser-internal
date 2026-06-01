@@ -256,8 +256,18 @@ export class BackendManager {
     };
 
     if (isDev) {
-      // In development, run using uvicorn module to allow correct relative imports in backend package
-      command = 'python3';
+      // In development, run using uvicorn module from local virtualenv if present
+      const venvBin = process.platform === 'win32' ? 'python.exe' : 'python3';
+      const localVenv = path.join(app.getAppPath(), '.venv', 'bin', venvBin);
+      const localVenvScripts = path.join(app.getAppPath(), '.venv', 'Scripts', 'python.exe');
+      
+      if (fs.existsSync(localVenv)) {
+        command = localVenv;
+      } else if (process.platform === 'win32' && fs.existsSync(localVenvScripts)) {
+        command = localVenvScripts;
+      } else {
+        command = 'python3';
+      }
       args = ['-m', 'uvicorn', 'backend.main:app', '--host', '127.0.0.1', '--port', this.port.toString(), '--log-level', 'info'];
     } else {
       // In production, run the packaged binary inside extraResources
