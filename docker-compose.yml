@@ -1,0 +1,16 @@
+services:
+  manager:
+    build: ./CloakBrowser-Manager
+    image: cloakbrowser-manager-local:latest
+    container_name: cloak-manager
+    ports:
+      - "127.0.0.1:8080:8080"   # UI port — chỉ bind localhost, không expose ra ngoài
+    volumes:
+      - cloak_profiles:/data    # persistent data: profiles, cookies, sessions
+    restart: unless-stopped
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
+
+volumes:
+  cloak_profiles:
+    driver: local

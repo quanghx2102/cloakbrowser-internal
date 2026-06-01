@@ -1,0 +1,32 @@
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.venv/
+
+# Node & Build Artifacts
+**/node_modules/
+**/dist/
+**/dist-electron/
+**/build/
+**/release/
+
+# Local Data Storage
+**/data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Deploy
+deploy.sh
+
+# Claude Code
+.claude/
+CLAUDE.md
+publish-docker.sh
+.beads
+debug
