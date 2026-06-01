@@ -1049,7 +1049,7 @@ async def launch_profile(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found")
     current_status = browser_mgr.statuses.get(profile_id)
     if profile_id in browser_mgr.running or current_status in ("starting", "running", "stopping"):
-        raise HTTPException(status_code=409, detail=f"Profile is already {current_status or 'running'}")
+        raise HTTPException(status_code=409, detail={"error_code": "PROFILE_ALREADY_RUNNING", "message": f"Profile is already {current_status or 'running'}"})
 
     try:
         running = await browser_mgr.launch(profile)
@@ -1058,6 +1058,9 @@ async def launch_profile(profile_id: str):
         if "CLOAK_BROWSER_BINARY_NOT_FOUND" in err_msg:
             clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_FOUND: ", "")
             raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_FOUND", "message": clean_msg})
+        elif "CLOAK_BROWSER_BINARY_NOT_CONFIGURED" in err_msg:
+            clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_CONFIGURED: ", "")
+            raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_CONFIGURED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to launch browser")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1066,6 +1069,12 @@ async def launch_profile(profile_id: str):
         if "RESOURCE_LIMIT_REACHED" in err_msg:
             clean_msg = err_msg.replace("RESOURCE_LIMIT_REACHED: ", "")
             raise HTTPException(status_code=409, detail={"error_code": "RESOURCE_LIMIT_REACHED", "message": clean_msg})
+        elif "PROFILE_ALREADY_RUNNING" in err_msg:
+            clean_msg = err_msg.replace("PROFILE_ALREADY_RUNNING: ", "")
+            raise HTTPException(status_code=409, detail={"error_code": "PROFILE_ALREADY_RUNNING", "message": clean_msg})
+        elif "BROWSER_NATIVE_START_FAILED" in err_msg:
+            clean_msg = err_msg.replace("BROWSER_NATIVE_START_FAILED: ", "")
+            raise HTTPException(status_code=500, detail={"error_code": "BROWSER_NATIVE_START_FAILED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to launch browser")
     except Exception as exc:
         logger.error("Failed to launch profile %s: %s", profile_id, exc)
@@ -1107,6 +1116,9 @@ async def restart_profile(profile_id: str):
         if "CLOAK_BROWSER_BINARY_NOT_FOUND" in err_msg:
             clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_FOUND: ", "")
             raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_FOUND", "message": clean_msg})
+        elif "CLOAK_BROWSER_BINARY_NOT_CONFIGURED" in err_msg:
+            clean_msg = err_msg.replace("CLOAK_BROWSER_BINARY_NOT_CONFIGURED: ", "")
+            raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_CONFIGURED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to restart browser")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1115,6 +1127,12 @@ async def restart_profile(profile_id: str):
         if "RESOURCE_LIMIT_REACHED" in err_msg:
             clean_msg = err_msg.replace("RESOURCE_LIMIT_REACHED: ", "")
             raise HTTPException(status_code=409, detail={"error_code": "RESOURCE_LIMIT_REACHED", "message": clean_msg})
+        elif "PROFILE_ALREADY_RUNNING" in err_msg:
+            clean_msg = err_msg.replace("PROFILE_ALREADY_RUNNING: ", "")
+            raise HTTPException(status_code=409, detail={"error_code": "PROFILE_ALREADY_RUNNING", "message": clean_msg})
+        elif "BROWSER_NATIVE_START_FAILED" in err_msg:
+            clean_msg = err_msg.replace("BROWSER_NATIVE_START_FAILED: ", "")
+            raise HTTPException(status_code=500, detail={"error_code": "BROWSER_NATIVE_START_FAILED", "message": clean_msg})
         raise HTTPException(status_code=500, detail="Failed to restart browser")
     except Exception as exc:
         logger.error("Failed to restart profile %s: %s", profile_id, exc)
@@ -1154,6 +1172,147 @@ async def get_system_status():
         profiles_total=len(profiles),
         is_desktop=browser_mgr.is_desktop,
     )
+
+
+@app.get("/api/status/binary")
+async def get_binary_status_route():
+    import platform
+    from pathlib import Path
+    import os
+    import json
+
+    binary_path = None
+    path_configured = False
+
+    # 1. Env overrides
+    env_path = os.environ.get("CLOAK_BROWSER_BINARY_PATH") or os.environ.get("CLOAKBROWSER_BINARY_PATH")
+    if env_path:
+        binary_path = env_path
+        path_configured = True
+
+    # 2. Config
+    if not binary_path:
+        data_dir = os.environ.get("CLOAK_DATA_DIR")
+        if data_dir:
+            config_path = Path(data_dir) / "config" / "app-config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config_data = json.load(f)
+                        saved_path = config_data.get("cloakbrowser_binary_path")
+                        if saved_path:
+                            binary_path = saved_path
+                            path_configured = True
+                except Exception:
+                    pass
+
+    # 3. macOS Auto-detect
+    if not binary_path and platform.system() == "Darwin":
+        home_dir = Path.home()
+        base_dir = home_dir / ".cloakbrowser"
+        if base_dir.exists():
+            try:
+                for entry in base_dir.iterdir():
+                    if entry.is_dir() and entry.name.startswith("chromium-"):
+                        candidate = entry / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+                        if candidate.exists():
+                            binary_path = str(candidate.resolve())
+                            break
+            except Exception:
+                pass
+
+    # 4. Bundled
+    if not binary_path:
+        bin_name = "cloakbrowser.exe" if platform.system() == "Windows" else "cloakbrowser"
+        candidate_dirs = []
+        data_dir = os.environ.get("CLOAK_DATA_DIR")
+        if data_dir:
+            candidate_dirs.append(Path(data_dir) / "browsers")
+        candidate_dirs.extend([
+            Path("binaries"),
+            Path("backend") / "binaries",
+            Path("..") / "binaries",
+            Path(os.getcwd()) / "binaries"
+        ])
+        for candidate_dir in candidate_dirs:
+            candidate = candidate_dir / bin_name
+            if candidate.exists():
+                binary_path = str(candidate.resolve())
+                break
+
+    # Determine status
+    status = "Missing"
+    if binary_path:
+        p = Path(binary_path)
+        if p.exists() and p.is_file():
+            if platform.system() != "Windows":
+                if os.access(binary_path, os.X_OK):
+                    status = "Ready"
+                else:
+                    status = "Invalid"
+            else:
+                status = "Ready"
+        else:
+            status = "Invalid"
+
+    return {
+        "path": binary_path,
+        "status": status,
+        "is_desktop": browser_mgr.is_desktop,
+    }
+
+
+from pydantic import BaseModel
+
+class BinaryPathUpdate(BaseModel):
+    path: str
+
+
+@app.post("/api/status/binary")
+async def update_binary_status_route(body: BinaryPathUpdate):
+    import platform
+    from pathlib import Path
+    import os
+    import json
+
+    data_dir = os.environ.get("CLOAK_DATA_DIR")
+    if not data_dir:
+        raise HTTPException(status_code=500, detail="CLOAK_DATA_DIR is not configured")
+
+    binary_path = body.path
+    p = Path(binary_path)
+    if not p.exists() or not p.is_file():
+        raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_FOUND", "message": "File does not exist"})
+
+    if platform.system() != "Windows":
+        if not os.access(binary_path, os.X_OK):
+            try:
+                os.chmod(binary_path, 0o755)
+            except Exception:
+                raise HTTPException(status_code=400, detail={"error_code": "CLOAK_BROWSER_BINARY_NOT_FOUND", "message": "File is not executable"})
+
+    # Save to config
+    config_dir = Path(data_dir) / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path = config_dir / "app-config.json"
+    
+    config_data = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                config_data = json.load(f)
+        except Exception:
+            pass
+
+    config_data["cloakbrowser_binary_path"] = binary_path
+    
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config_data, f, indent=2, ensure_ascii=False)
+
+    # Update env in current process
+    os.environ["CLOAKBROWSER_BINARY_PATH"] = binary_path
+
+    return {"ok": True, "path": binary_path}
 
 
 # ── Clipboard Relay ──────────────────────────────────────────────────────────

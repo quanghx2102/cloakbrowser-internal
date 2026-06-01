@@ -66,6 +66,107 @@ export class BackendManager {
     }
   }
 
+  public getConfigFile(): string {
+    return path.join(this.dataDir, 'config', 'app-config.json');
+  }
+
+  public getSavedBinaryPath(): string | null {
+    const configPath = this.getConfigFile();
+    if (fs.existsSync(configPath)) {
+      try {
+        const content = fs.readFileSync(configPath, 'utf8');
+        const config = JSON.parse(content);
+        return config.cloakbrowser_binary_path || null;
+      } catch (e) {
+        console.error('Failed to read app-config.json:', e);
+      }
+    }
+    return null;
+  }
+
+  public saveBinaryPath(binaryPath: string): void {
+    const configPath = this.getConfigFile();
+    let config: any = {};
+    if (fs.existsSync(configPath)) {
+      try {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      } catch (e) {
+        // ignore
+      }
+    }
+    config.cloakbrowser_binary_path = binaryPath;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+  }
+
+  public resolveBinaryPath(): { path: string | null; status: 'Ready' | 'Missing' | 'Invalid'; errorCode?: string } {
+    // 1. Env override for dev/debug
+    let binaryPath = process.env.CLOAK_BROWSER_BINARY_PATH || process.env.CLOAKBROWSER_BINARY_PATH || null;
+    if (binaryPath) {
+      if (fs.existsSync(binaryPath)) {
+        if (process.platform !== 'win32') {
+          try {
+            fs.accessSync(binaryPath, fs.constants.X_OK);
+          } catch (err) {
+            return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+          }
+        }
+        return { path: binaryPath, status: 'Ready' };
+      } else {
+        return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+      }
+    }
+
+    // 2. Config saved in app-config.json
+    binaryPath = this.getSavedBinaryPath();
+    if (binaryPath) {
+      if (fs.existsSync(binaryPath)) {
+        if (process.platform !== 'win32') {
+          try {
+            fs.accessSync(binaryPath, fs.constants.X_OK);
+          } catch (err) {
+            return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+          }
+        }
+        return { path: binaryPath, status: 'Ready' };
+      } else {
+        return { path: binaryPath, status: 'Invalid', errorCode: 'CLOAK_BROWSER_BINARY_NOT_FOUND' };
+      }
+    }
+
+    // 3. Auto-detect on macOS
+    if (process.platform === 'darwin') {
+      const baseDir = path.join(app.getPath('home'), '.cloakbrowser');
+      if (fs.existsSync(baseDir)) {
+        try {
+          const files = fs.readdirSync(baseDir);
+          for (const file of files) {
+            if (file.startsWith('chromium-')) {
+              const candidate = path.join(baseDir, file, 'Chromium.app', 'Contents', 'MacOS', 'Chromium');
+              if (fs.existsSync(candidate)) {
+                return { path: candidate, status: 'Ready' };
+              }
+            }
+          }
+        } catch (e) {
+          console.warn('Error scanning for macOS auto-detect binary:', e);
+        }
+      }
+    }
+
+    // 4. Bundled binary in app resources if available
+    const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
+    let bundledBrowserPath = path.join(process.resourcesPath, 'binaries', browserBinName);
+    if (fs.existsSync(bundledBrowserPath)) {
+      return { path: bundledBrowserPath, status: 'Ready' };
+    }
+    bundledBrowserPath = path.join(app.getAppPath(), 'binaries', browserBinName);
+    if (fs.existsSync(bundledBrowserPath)) {
+      return { path: bundledBrowserPath, status: 'Ready' };
+    }
+
+    return { path: null, status: 'Missing', errorCode: 'CLOAK_BROWSER_BINARY_NOT_CONFIGURED' };
+  }
+
   public getPort(): number {
     return this.port;
   }
@@ -81,27 +182,12 @@ export class BackendManager {
     let command = '';
     let args: string[] = [];
 
-    const browserBinName = process.platform === 'win32' ? 'cloakbrowser.exe' : 'cloakbrowser';
-    let bundledBrowserPath = path.join(process.resourcesPath, 'binaries', browserBinName);
-    if (!fs.existsSync(bundledBrowserPath)) {
-      bundledBrowserPath = path.join(app.getAppPath(), 'binaries', browserBinName);
-    }
-
-    const binaryPath = process.env.CLOAK_BROWSER_BINARY_PATH || bundledBrowserPath;
+    const binaryResolution = this.resolveBinaryPath();
+    const binaryPath = binaryResolution.path || '';
 
     // Log data path and binary path
     console.log(`[Lifecycle] APP_DATA_DIR: ${this.dataDir}`);
-    console.log(`[Lifecycle] CLOAK_BROWSER_BINARY_PATH: ${binaryPath}`);
-
-    // Validate CloakBrowser Binary exists
-    if (!fs.existsSync(binaryPath)) {
-      console.error(`[Error] CLOAK_BROWSER_BINARY_NOT_FOUND: CloakBrowser binary not found at ${binaryPath}`);
-      dialog.showErrorBox(
-        'Không tìm thấy CloakBrowser Binary',
-        `Ứng dụng không tìm thấy file chạy CloakBrowser tại đường dẫn:\n${binaryPath}\n\nVui lòng cấu hình biến môi trường CLOAK_BROWSER_BINARY_PATH hoặc đặt file chạy vào thư mục browsers.`
-      );
-      return false;
-    }
+    console.log(`[Lifecycle] Resolved CloakBrowser Binary: ${binaryPath || 'NONE'} (Status: ${binaryResolution.status})`);
 
     const env = {
       ...process.env,

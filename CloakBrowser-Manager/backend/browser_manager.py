@@ -293,45 +293,82 @@ class BrowserManager:
                 _validate_proxy(proxy)
 
             import platform
-            # Resolve CloakBrowser binary path
-            binary_path = os.environ.get("CLOAK_BROWSER_BINARY_PATH") or os.environ.get("CLOAKBROWSER_BINARY_PATH")
-            
+            from pathlib import Path
+            import json
+
+            binary_path = None
+            path_configured = False
+
+            # 1. Env overrides for dev/debug
+            env_path = os.environ.get("CLOAK_BROWSER_BINARY_PATH") or os.environ.get("CLOAKBROWSER_BINARY_PATH")
+            if env_path:
+                binary_path = env_path
+                path_configured = True
+
+            # 2. Config saved in app-config.json
             if not binary_path:
-                # Look in CLOAK_DATA_DIR/browsers/cloakbrowser (or cloakbrowser.exe)
                 data_dir = os.environ.get("CLOAK_DATA_DIR")
                 if data_dir:
-                    bin_name = "cloakbrowser.exe" if platform.system() == "Windows" else "cloakbrowser"
-                    candidate = Path(data_dir) / "browsers" / bin_name
-                    if candidate.exists():
-                        binary_path = str(candidate)
+                    config_path = Path(data_dir) / "config" / "app-config.json"
+                    if config_path.exists():
+                        try:
+                            with open(config_path, "r", encoding="utf-8") as f:
+                                config_data = json.load(f)
+                                saved_path = config_data.get("cloakbrowser_binary_path")
+                                if saved_path:
+                                    binary_path = saved_path
+                                    path_configured = True
+                        except Exception as e:
+                            logger.warning(f"Failed to read app-config.json in python backend: {e}")
 
-            # If still not found, check if there's a local dev/fallback binary in the current workspace or bundled resources
+            # 3. Auto-detect on macOS
+            if not binary_path and platform.system() == "Darwin":
+                home_dir = Path.home()
+                base_dir = home_dir / ".cloakbrowser"
+                if base_dir.exists():
+                    try:
+                        for entry in base_dir.iterdir():
+                            if entry.is_dir() and entry.name.startswith("chromium-"):
+                                candidate = entry / "Chromium.app" / "Contents" / "MacOS" / "Chromium"
+                                if candidate.exists():
+                                    binary_path = str(candidate.resolve())
+                                    break
+                    except Exception as e:
+                        logger.warning(f"Error scanning for macOS auto-detect binary: {e}")
+
+            # 4. Bundled binary in app resources if available
             if not binary_path:
                 bin_name = "cloakbrowser.exe" if platform.system() == "Windows" else "cloakbrowser"
-                for candidate_dir in [
+                candidate_dirs = []
+                data_dir = os.environ.get("CLOAK_DATA_DIR")
+                if data_dir:
+                    candidate_dirs.append(Path(data_dir) / "browsers")
+                candidate_dirs.extend([
                     Path("binaries"),
                     Path("backend") / "binaries",
                     Path("..") / "binaries",
                     Path(os.getcwd()) / "binaries"
-                ]:
+                ])
+                for candidate_dir in candidate_dirs:
                     candidate = candidate_dir / bin_name
                     if candidate.exists():
                         binary_path = str(candidate.resolve())
                         break
 
-            # Validate binary path
+            # Validate resolved binary path
             if binary_path:
                 binary_path = os.path.realpath(binary_path)
 
             if not binary_path or not Path(binary_path).exists() or not Path(binary_path).is_file():
+                error_code = "CLOAK_BROWSER_BINARY_NOT_FOUND" if path_configured else "CLOAK_BROWSER_BINARY_NOT_CONFIGURED"
                 log_error(
                     module="browser_manager",
                     action="launch_profile",
-                    error_code="CLOAK_BROWSER_BINARY_NOT_FOUND",
-                    message=f"CloakBrowser binary not found at '{binary_path or 'unknown'}'",
+                    error_code=error_code,
+                    message=f"CloakBrowser binary not found or configured at '{binary_path or 'unknown'}'",
                     profile_id=profile_id,
                 )
-                raise FileNotFoundError(f"CLOAK_BROWSER_BINARY_NOT_FOUND: CloakBrowser binary not found. Please set CLOAK_BROWSER_BINARY_PATH or place the binary in your browsers folder.")
+                raise FileNotFoundError(f"{error_code}: CloakBrowser binary not configured or not found. Please set CLOAK_BROWSER_BINARY_PATH or configure it in settings.")
 
             # Validate execution permission on non-Windows systems
             if platform.system() != "Windows":
@@ -361,78 +398,132 @@ class BrowserManager:
 
             # Launch CloakBrowser on that display
             # DISPLAY is passed via env kwarg to avoid process-wide os.environ mutation
-            context = await launch_persistent_context_async(
-                user_data_dir=profile["user_data_dir"],
-                headless=bool(profile.get("headless", False)),
-                proxy=proxy,
-                args=extra_args,
-                timezone=timezone,
-                locale=locale,
-                humanize=bool(profile.get("humanize", False)),
-                human_preset=profile.get("human_preset", "default"),
-                geoip=bool(profile.get("geoip", False)),
-                color_scheme=profile.get("color_scheme") or None,
-                user_agent=profile.get("user_agent") or None,
-                viewport={
-                    "width": profile.get("screen_width", 1920),
-                    "height": profile.get("screen_height", 1080) - 133,
-                },
-                env=env_args,
-            )
+            if self.is_desktop:
+                from cloakbrowser import build_args
+                chrome_args = [f"--user-data-dir={profile['user_data_dir']}"]
+                stealth_chrome_args = build_args(
+                    stealth_args=True,
+                    extra_args=extra_args,
+                    timezone=timezone,
+                    locale=locale,
+                    headless=bool(profile.get("headless", False)),
+                )
+                chrome_args.extend(stealth_chrome_args)
+                if proxy:
+                    chrome_args.append(f"--proxy-server={proxy}")
+                if user_agent := (profile.get("user_agent") or None):
+                    chrome_args.append(f"--user-agent={user_agent}")
 
-            # Inject clipboard listener: captures copied text on every page
-            # so the GET /clipboard endpoint can read it via page.evaluate()
-            _clipboard_init_js = """
-                window.__clipboardText = '';
-                document.addEventListener('copy', () => {
-                    const sel = window.getSelection();
-                    if (sel) window.__clipboardText = sel.toString();
-                });
-                document.addEventListener('keydown', (e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.altKey && !e.shiftKey) {
+                # Launch native subprocess
+                process = await asyncio.create_subprocess_exec(
+                    binary_path,
+                    *chrome_args,
+                    env=env_args,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                pid = process.pid
+
+                running = RunningProfile(
+                    profile_id=profile_id,
+                    context=None,
+                    display=display,
+                    ws_port=ws_port,
+                    cdp_port=cdp_port,
+                    pid=pid,
+                )
+
+                # Monitor native process exit
+                async def watch_process(proc, p_id):
+                    await proc.wait()
+                    await self._on_browser_closed(p_id)
+
+                asyncio.create_task(watch_process(process, profile_id))
+            else:
+                context = await launch_persistent_context_async(
+                    user_data_dir=profile["user_data_dir"],
+                    headless=bool(profile.get("headless", False)),
+                    proxy=proxy,
+                    args=extra_args,
+                    timezone=timezone,
+                    locale=locale,
+                    humanize=bool(profile.get("humanize", False)),
+                    human_preset=profile.get("human_preset", "default"),
+                    geoip=bool(profile.get("geoip", False)),
+                    color_scheme=profile.get("color_scheme") or None,
+                    user_agent=profile.get("user_agent") or None,
+                    viewport={
+                        "width": profile.get("screen_width", 1920),
+                        "height": profile.get("screen_height", 1080) - 133,
+                    },
+                    env=env_args,
+                )
+
+                # Inject clipboard listener: captures copied text on every page
+                # so the GET /clipboard endpoint can read it via page.evaluate()
+                _clipboard_init_js = """
+                    window.__clipboardText = '';
+                    document.addEventListener('copy', () => {
                         const sel = window.getSelection();
-                        if (sel && sel.toString()) window.__clipboardText = sel.toString();
-                    }
-                });
-            """
-            await context.add_init_script(_clipboard_init_js)
-            # Also inject into already-open pages (about:blank created before init_script)
-            for p in context.pages:
+                        if (sel) window.__clipboardText = sel.toString();
+                    });
+                    document.addEventListener('keydown', (e) => {
+                        if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.altKey && !e.shiftKey) {
+                            const sel = window.getSelection();
+                            if (sel && sel.toString()) window.__clipboardText = sel.toString();
+                        }
+                    });
+                """
+                await context.add_init_script(_clipboard_init_js)
+                # Also inject into already-open pages (about:blank created before init_script)
+                for p in context.pages:
+                    try:
+                        await p.evaluate(_clipboard_init_js)
+                    except Exception as exc:
+                        logger.debug("Clipboard init failed on existing page: %s", exc)
+
+                # Get browser process PID
+                import subprocess
+                pid = None
                 try:
-                    await p.evaluate(_clipboard_init_js)
-                except Exception as exc:
-                    logger.debug("Clipboard init failed on existing page: %s", exc)
+                    out = subprocess.check_output(["pgrep", "-f", f"--remote-debugging-port={cdp_port}"])
+                    lines = out.decode().strip().split('\n')
+                    if lines and lines[0]:
+                        pid = int(lines[0])
+                except Exception as e:
+                    logger.warning("Failed to find PID for profile %s: %s", profile_id, e)
 
-            # Get browser process PID
-            import subprocess
-            pid = None
-            try:
-                out = subprocess.check_output(["pgrep", "-f", f"--remote-debugging-port={cdp_port}"])
-                lines = out.decode().strip().split('\n')
-                if lines and lines[0]:
-                    pid = int(lines[0])
-            except Exception as e:
-                logger.warning("Failed to find PID for profile %s: %s", profile_id, e)
+                running = RunningProfile(
+                    profile_id=profile_id,
+                    context=context,
+                    display=display,
+                    ws_port=ws_port,
+                    cdp_port=cdp_port,
+                    pid=pid,
+                )
 
-            running = RunningProfile(
-                profile_id=profile_id,
-                context=context,
-                display=display,
-                ws_port=ws_port,
-                cdp_port=cdp_port,
-                pid=pid,
-            )
-
-            # Auto-cleanup if browser crashes or user closes Chrome via VNC
-            context.on("close", lambda: asyncio.ensure_future(
-                self._on_browser_closed(profile_id)
-            ))
+                # Auto-cleanup if browser crashes or user closes Chrome via VNC
+                context.on("close", lambda: asyncio.ensure_future(
+                    self._on_browser_closed(profile_id)
+                ))
 
             async with self._lock:
                 if self.statuses.get(profile_id) not in ("starting", "running"):
                     # Cancelled/stopped during launch!
                     logger.info("Profile launch cancelled/stopped for %s", profile_id)
-                    await context.close()
+                    if running.context is not None:
+                        await running.context.close()
+                    else:
+                        if running.pid:
+                            try:
+                                import platform
+                                if platform.system() == "Windows":
+                                    import subprocess
+                                    subprocess.run(["taskkill", "/PID", str(running.pid)], capture_output=True, text=True)
+                                else:
+                                    os.kill(running.pid, 9)
+                            except OSError:
+                                pass
                     if display is not None:
                         await self.vnc.stop_vnc(display)
                     raise RuntimeError("Profile launch was cancelled or stopped")
@@ -473,6 +564,7 @@ class BrowserManager:
                     message=f"Failed to launch native browser {profile_id}: {exc}",
                     profile_id=profile_id,
                 )
+                raise RuntimeError(f"BROWSER_NATIVE_START_FAILED: Failed to launch native browser: {exc}")
             else:
                 log_error(
                     module="browser_manager",
@@ -481,9 +573,9 @@ class BrowserManager:
                     message=f"Failed to launch browser {profile_id} via VNC: {exc}",
                     profile_id=profile_id,
                 )
+                raise exc
             if display is not None:
                 await self.vnc.stop_vnc(display)
-            raise
 
     async def _on_browser_closed(self, profile_id: str):
         """Called when browser exits (crash, user closed via VNC, or stop())."""
@@ -521,105 +613,159 @@ class BrowserManager:
 
         log_activity("browser_manager", "stop_profile", "stopping", f"Stopping profile {profile_id}", profile_id)
 
-        # 1. Check if process exists/is alive
-        process_alive = False
-        if running.pid:
-            try:
-                os.kill(running.pid, 0)
-                process_alive = True
-            except OSError:
-                process_alive = False
-
-        if running.pid and not process_alive:
-            async with self._lock:
-                self.statuses[profile_id] = "crashed"
-            if self.is_desktop:
-                log_activity(
-                    module="browser_manager",
-                    action="stop_profile",
-                    status="BROWSER_NATIVE_STOP_FAILED",
-                    message=f"Process {running.pid} for profile {profile_id} does not exist (already crashed/stopped).",
-                    profile_id=profile_id,
-                )
-            else:
-                log_activity("browser_manager", "stop_profile", "failed", f"Process {running.pid} does not exist", profile_id)
-            if running.display is not None:
-                await self.vnc.stop_vnc(running.display)
-            return
-
-        # 2. Try graceful stop
-        graceful_success = False
         try:
-            await asyncio.wait_for(running.context.close(), timeout=5.0)
-            graceful_success = True
-        except asyncio.TimeoutError:
-            logger.warning("Timeout waiting for context close on %s, forcing kill", profile_id)
-        except Exception as exc:
-            exc_str = str(exc)
-            if any(msg in exc_str for msg in ("Connection closed", "Target closed", "Target page, context or browser has been closed", "Browser closed")):
-                logger.info("Browser context closed during shutdown for %s: %s", profile_id, exc_str)
-                graceful_success = True
-            else:
-                log_error("browser_manager", "stop_profile", f"Error closing context for {profile_id}: {exc}", profile_id)
-
-        # 3. Wait briefly for process to exit
-        if graceful_success and running.pid:
-            for _ in range(30):
+            # 1. Check if process exists/is alive
+            process_alive = False
+            if running.pid:
                 try:
                     os.kill(running.pid, 0)
-                    await asyncio.sleep(0.1)
+                    process_alive = True
                 except OSError:
                     process_alive = False
-                    break
 
-        # 4. Force kill if still alive
-        if process_alive and running.pid:
-            logger.info("Forcing kill on process %d for profile %s", running.pid, profile_id)
-            try:
-                os.kill(running.pid, 9)  # SIGKILL
-                # Wait briefly to let OS clean it up
-                for _ in range(10):
+            if running.pid and not process_alive:
+                async with self._lock:
+                    self.statuses[profile_id] = "crashed"
+                if self.is_desktop:
+                    log_activity(
+                        module="browser_manager",
+                        action="stop_profile",
+                        status="BROWSER_NATIVE_STOP_FAILED",
+                        message=f"Process {running.pid} for profile {profile_id} does not exist (already crashed/stopped).",
+                        profile_id=profile_id,
+                    )
+                else:
+                    log_activity("browser_manager", "stop_profile", "failed", f"Process {running.pid} does not exist", profile_id)
+                if running.display is not None:
+                    await self.vnc.stop_vnc(running.display)
+                return
+
+            # 2. Try graceful stop
+            graceful_success = False
+            if running.context is not None:
+                try:
+                    await asyncio.wait_for(running.context.close(), timeout=5.0)
+                    graceful_success = True
+                except asyncio.TimeoutError:
+                    logger.warning("Timeout waiting for context close on %s, forcing kill", profile_id)
+                except Exception as exc:
+                    exc_str = str(exc)
+                    if any(msg in exc_str for msg in ("Connection closed", "Target closed", "Target page, context or browser has been closed", "Browser closed")):
+                        logger.info("Browser context closed during shutdown for %s: %s", profile_id, exc_str)
+                        graceful_success = True
+                    else:
+                        log_error("browser_manager", "stop_profile", f"Error closing context for {profile_id}: {exc}", profile_id)
+            else:
+                if running.pid:
+                    try:
+                        import platform
+                        if platform.system() == "Windows":
+                            import subprocess
+                            subprocess.run(["taskkill", "/PID", str(running.pid)], capture_output=True, text=True)
+                        else:
+                            os.kill(running.pid, 15)  # SIGTERM
+                        graceful_success = True
+                    except OSError:
+                        pass
+
+            # 3. Wait briefly for process to exit
+            if graceful_success and running.pid:
+                for _ in range(30):
                     try:
                         os.kill(running.pid, 0)
                         await asyncio.sleep(0.1)
                     except OSError:
                         process_alive = False
                         break
-                # Reap to prevent zombies if it's a direct child
+
+            # 4. Force kill if still alive
+            if process_alive and running.pid:
+                logger.info("Forcing kill on process %d for profile %s", running.pid, profile_id)
                 try:
-                    os.waitpid(running.pid, os.WNOHANG)
-                except ChildProcessError:
-                    pass
-            except OSError as e:
-                logger.warning("Failed to kill process %d: %s", running.pid, e)
+                    os.kill(running.pid, 9)  # SIGKILL
+                    # Wait briefly to let OS clean it up
+                    for _ in range(10):
+                        try:
+                            os.kill(running.pid, 0)
+                            await asyncio.sleep(0.1)
+                        except OSError:
+                            process_alive = False
+                            break
+                    # Reap to prevent zombies if it's a direct child
+                    try:
+                        os.waitpid(running.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
+                except OSError as e:
+                    logger.warning("Failed to kill process %d: %s", running.pid, e)
 
-        # 5. Fallback for non-PID cases or if still somehow alive
-        if process_alive or not running.pid:
-            import subprocess
-            try:
-                subprocess.run(
-                    ["pkill", "-f", f"--remote-debugging-port={running.cdp_port}"],
-                    check=False
+            # 5. Fallback for non-PID cases or if still somehow alive
+            if process_alive or not running.pid:
+                import subprocess
+                try:
+                    subprocess.run(
+                        ["pkill", "-f", f"--remote-debugging-port={running.cdp_port}"],
+                        check=False
+                    )
+                    # Small sleep after fallback kill
+                    await asyncio.sleep(0.5)
+                except Exception as e:
+                    log_error("browser_manager", "stop_profile", f"Error running pkill for {profile_id}: {e}", profile_id)
+
+            if running.display is not None:
+                await self.vnc.stop_vnc(running.display)
+
+            # 6. Verify process liveness one last time
+            still_alive = False
+            if process_alive and running.pid:
+                try:
+                    os.kill(running.pid, 0)
+                    still_alive = True
+                except OSError:
+                    still_alive = False
+
+            if still_alive:
+                async with self._lock:
+                    self.statuses[profile_id] = "failed"
+                if self.is_desktop:
+                    log_error(
+                        module="browser_manager",
+                        action="stop_profile",
+                        error_code="BROWSER_NATIVE_STOP_FAILED",
+                        message=f"Failed to stop native profile {profile_id}. Process {running.pid} is still alive.",
+                        profile_id=profile_id,
+                    )
+                else:
+                    log_activity("browser_manager", "stop_profile", "failed", f"Failed to stop profile {profile_id}", profile_id)
+                return
+
+            async with self._lock:
+                self.statuses[profile_id] = "stopped"
+
+            if self.is_desktop:
+                log_activity(
+                    module="browser_manager",
+                    action="stop_profile",
+                    status="BROWSER_NATIVE_STOPPED",
+                    message=f"Successfully stopped native profile {profile_id}",
+                    profile_id=profile_id,
                 )
-            except Exception as e:
-                log_error("browser_manager", "stop_profile", f"Error running pkill for {profile_id}: {e}", profile_id)
+            else:
+                log_activity("browser_manager", "stop_profile", "success", f"Successfully stopped profile {profile_id}", profile_id)
 
-        if running.display is not None:
-            await self.vnc.stop_vnc(running.display)
-        
-        async with self._lock:
-            self.statuses[profile_id] = "stopped"
-
-        if self.is_desktop:
-            log_activity(
-                module="browser_manager",
-                action="stop_profile",
-                status="BROWSER_NATIVE_STOPPED",
-                message=f"Successfully stopped native profile {profile_id}",
-                profile_id=profile_id,
-            )
-        else:
-            log_activity("browser_manager", "stop_profile", "success", f"Successfully stopped profile {profile_id}", profile_id)
+        except Exception as e:
+            async with self._lock:
+                self.statuses[profile_id] = "failed"
+            if self.is_desktop:
+                log_error(
+                    module="browser_manager",
+                    action="stop_profile",
+                    error_code="BROWSER_NATIVE_STOP_FAILED",
+                    message=f"Exception during stop for native profile {profile_id}: {e}",
+                    profile_id=profile_id,
+                )
+            else:
+                log_error("browser_manager", "stop_profile", "BROWSER_STOP_FAILED", f"Exception during stop for profile {profile_id}: {e}", profile_id)
 
     async def restart(self, profile: dict[str, Any]):
         """Restart a browser instance by stopping it fully and launching again."""

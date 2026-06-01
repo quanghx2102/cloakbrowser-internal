@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { Lock, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Lock, PanelLeftClose, PanelLeft, Settings } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import { useProxies } from "./hooks/useProxies";
 import { api, setOnUnauthorized, type ProfileCreateData, type ProxyCreateData } from "./lib/api";
@@ -12,10 +12,11 @@ import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { Dashboard } from "./components/Dashboard";
+import { SettingsTab } from "./components/SettingsTab";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create_profile" | "edit_profile" | "view_profile" | "logs_profile" | "create_proxy" | "edit_proxy";
-type Tab = "dashboard" | "profiles" | "proxies";
+type Tab = "dashboard" | "profiles" | "proxies" | "settings";
 type Toast = { message: string; type: "success" | "error" } | null;
 
 export default function App() {
@@ -317,10 +318,21 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
         >
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>
         </button>
+        <button
+          onClick={() => setActiveTab("settings")}
+          className={`p-3 rounded-xl transition-colors ${
+            activeTab === "settings"
+              ? "bg-accent/15 text-accent"
+              : "text-gray-500 hover:text-gray-300 hover:bg-surface-2"
+          }`}
+          title="Cấu hình"
+        >
+          <Settings className="w-5 h-5" />
+        </button>
       </div>
 
       {/* Sidebar */}
-      {sidebarOpen && activeTab !== "dashboard" && (
+      {sidebarOpen && activeTab !== "dashboard" && activeTab !== "settings" && (
         <div className="w-[680px] border-r border-border bg-surface-1 flex-shrink-0">
           {activeTab === "profiles" ? (
             <ProfileList
@@ -353,7 +365,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
         {/* Top bar */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-1">
           <div className="flex items-center gap-3">
-            {activeTab !== "dashboard" && (
+            {activeTab !== "dashboard" && activeTab !== "settings" && (
               <button
                 onClick={() => setSidebarOpen(!sidebarOpen)}
                 className="text-gray-500 hover:text-gray-300 p-1"
@@ -363,6 +375,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               </button>
             )}
             {activeTab === "dashboard" && <span className="text-sm font-medium">Bảng điều khiển</span>}
+            {activeTab === "settings" && <span className="text-sm font-medium">Cấu hình</span>}
             {selectedProfile && activeTab === "profiles" && (
               <div className="flex items-center gap-2">
                 <StatusIndicator status={selectedProfile.status} size="md" />
@@ -411,7 +424,12 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               <Dashboard />
             </div>
           )}
-          {activeTab !== "dashboard" && view === "empty" && (
+          {activeTab === "settings" && (
+            <div className="flex-1 overflow-y-auto">
+              <SettingsTab showToast={showToast} />
+            </div>
+          )}
+          {activeTab !== "dashboard" && activeTab !== "settings" && view === "empty" && (
             <div className="flex-1 flex flex-col items-center justify-center text-gray-500">
               <div className="h-16 w-16 mb-4 rounded-full bg-surface-3 flex items-center justify-center">
                 <span className="text-2xl">✨</span>

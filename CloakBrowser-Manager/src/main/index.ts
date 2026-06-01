@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import findFreePort from 'find-free-port';
@@ -50,6 +50,62 @@ if (!gotTheLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
+  });
+
+  // Register IPC handlers for CloakBrowser binary management
+  ipcMain.handle('get-binary-status', () => {
+    return backendManager.resolveBinaryPath();
+  });
+
+  ipcMain.handle('save-binary-path', (_event, binaryPath: string) => {
+    if (!binaryPath) {
+      return { success: false, error: 'Path is empty' };
+    }
+    if (!fs.existsSync(binaryPath)) {
+      return { success: false, error: 'File does not exist' };
+    }
+    if (process.platform !== 'win32') {
+      try {
+        fs.accessSync(binaryPath, fs.constants.X_OK);
+      } catch (err) {
+        return { success: false, error: 'File is not executable' };
+      }
+    }
+    backendManager.saveBinaryPath(binaryPath);
+    return { success: true };
+  });
+
+  ipcMain.handle('select-binary', async () => {
+    const result = await dialog.showOpenDialog({
+      title: 'Chọn CloakBrowser Binary',
+      properties: ['openFile'],
+      filters: [
+        {
+          name: 'Executables',
+          extensions: process.platform === 'win32' ? ['exe'] : ['*']
+        }
+      ]
+    });
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
+    }
+
+    const binaryPath = result.filePaths[0];
+    if (process.platform !== 'win32') {
+      try {
+        fs.accessSync(binaryPath, fs.constants.X_OK);
+      } catch (err) {
+        try {
+          fs.chmodSync(binaryPath, 0o755);
+        } catch (chmodErr) {
+          return { success: false, error: 'File is not executable and failed to set execute permission' };
+        }
+      }
+    }
+
+    backendManager.saveBinaryPath(binaryPath);
+    return { success: true, path: binaryPath };
   });
 
   // Ensure the backend process is stopped when Electron exits unexpectedly

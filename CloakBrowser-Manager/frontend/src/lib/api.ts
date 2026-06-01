@@ -251,6 +251,15 @@ export const api = {
 
   getStatus: () => request<SystemStatus>("/api/status"),
 
+  getBinaryStatus: () =>
+    request<{ path: string | null; status: "Ready" | "Missing" | "Invalid"; is_desktop: boolean }>("/api/status/binary"),
+
+  updateBinaryStatus: (path: string) =>
+    request<{ ok: boolean; path: string }>("/api/status/binary", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+
   setClipboard: (id: string, text: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}/clipboard`, {
       method: "POST",
