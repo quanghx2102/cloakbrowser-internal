@@ -77,6 +77,8 @@ async def check_proxy(proxy_record: dict[str, Any]) -> dict[str, Any]:
     last_ip = None
     timezone = None
     locale = None
+    country = None
+    asn = None
 
     start_time = time.monotonic()
     
@@ -94,6 +96,8 @@ async def check_proxy(proxy_record: dict[str, Any]) -> dict[str, Any]:
                     last_ip = data.get("query")
                     timezone = data.get("timezone")
                     country_code = data.get("countryCode")
+                    country = country_code
+                    asn = data.get("as")
                     locale = _map_country_to_locale(country_code)
                     
                     # If we get here, connection succeeded
@@ -141,4 +145,6 @@ async def check_proxy(proxy_record: dict[str, Any]) -> dict[str, Any]:
         "last_ip": last_ip,
         "timezone": timezone,
         "locale": locale,
+        "country": country,
+        "asn": asn,
     }

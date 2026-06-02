@@ -2,6 +2,8 @@ import { Save, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
 import type { Profile, ProfileCreateData, Proxy } from "../lib/api";
+import { VerificationBadge } from "./VerificationBadge";
+
 
 interface ProfileFormProps {
   profile: Profile | null; // null = create mode
@@ -77,6 +79,9 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
     auto_sync_timezone_with_proxy: false,
     auto_sync_locale_with_proxy: false,
     auto_sync_geolocation_with_proxy: false,
+    verification_status: "unverified",
+    require_verification_before_use: true,
+    verification_expires_minutes: 60,
   });
 
   const [saving, setSaving] = useState(false);
@@ -121,6 +126,9 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
         auto_sync_timezone_with_proxy: profile.auto_sync_timezone_with_proxy,
         auto_sync_locale_with_proxy: profile.auto_sync_locale_with_proxy,
         auto_sync_geolocation_with_proxy: profile.auto_sync_geolocation_with_proxy,
+        verification_status: profile.verification_status || "unverified",
+        require_verification_before_use: profile.require_verification_before_use ?? true,
+        verification_expires_minutes: profile.verification_expires_minutes ?? 60,
       });
     }
   }, [profile?.id]);
@@ -519,6 +527,79 @@ export function ProfileForm({ profile, proxies, onSave, onDelete, onCancel }: Pr
                     </div>
                 )}
               </>
+            )}
+          </div>
+        </section>
+
+        {/* Verification Status & Launch Gate */}
+        <section className="bg-surface-2/30 p-4 rounded-lg border border-border/50">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Xác thực & Launch Gate</h3>
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <label className="flex items-center gap-2 text-sm text-gray-200 font-medium cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.require_verification_before_use ?? true}
+                    onChange={(e) => set("require_verification_before_use", e.target.checked)}
+                    className="rounded border-border bg-surface-2 h-4 w-4 text-accent focus:ring-accent"
+                  />
+                  Yêu cầu xác thực trước khi chạy (Require Verification)
+                </label>
+                <p className="text-xs text-gray-500 mt-1 ml-6">
+                  Khi bật, profile sẽ bị chặn Launch nếu chưa xác thực, hết hạn xác thực hoặc xác thực thất bại.
+                </p>
+              </div>
+              <span className={`text-[10px] px-2 py-0.5 rounded font-semibold ${form.require_verification_before_use ? "bg-accent/15 text-accent" : "bg-gray-500/20 text-gray-400"}`}>
+                {form.require_verification_before_use ? "ON" : "OFF"}
+              </span>
+            </div>
+
+            <div>
+              <label className="label">Thời gian hết hạn xác thực (phút)</label>
+              <input
+                className="input"
+                type="number"
+                value={form.verification_expires_minutes ?? 60}
+                onChange={(e) => set("verification_expires_minutes", Number(e.target.value))}
+                placeholder="Mặc định: 60 phút"
+              />
+            </div>
+
+            {isEdit && profile && (
+              <div className="border-t border-border/40 pt-3 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-400">Trạng thái xác thực hiện tại:</span>
+                    <VerificationBadge status={form.verification_status} />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const updated = await api.verifyProfile(profile.id);
+                        set("verification_status", updated.verification_status);
+                        alert("Xác thực profile thành công!");
+                      } catch (err: any) {
+                        alert("Xác thực profile thất bại: " + err.message);
+                      }
+                    }}
+                    className="btn-primary text-xs flex items-center gap-1"
+                  >
+                    <span>Verify Profile / Re-Verify</span>
+                  </button>
+                </div>
+                {profile.last_verified_at && (
+                  <div className="text-[10px] text-gray-500 font-mono">
+                    Xác thực lần cuối lúc: {new Date(profile.last_verified_at).toLocaleString()}
+                  </div>
+                )}
+                {profile.last_verification_result && (
+                  <div className="text-[10px] text-amber-500 bg-amber-500/5 p-2 rounded border border-amber-500/10 font-mono">
+                    Kết quả cuối: {profile.last_verification_result}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </section>

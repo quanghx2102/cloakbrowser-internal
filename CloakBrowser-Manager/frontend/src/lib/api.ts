@@ -42,6 +42,17 @@ export interface Profile {
   last_fingerprint_change_at: string | null;
   last_session_save_at: string | null;
   last_proxy_change_at: string | null;
+  verification_status?: "unverified" | "checking" | "verified" | "warning" | "failed" | "expired";
+  last_verified_at?: string | null;
+  last_verification_result?: string | null;
+  require_verification_before_use?: boolean;
+  verification_expires_minutes?: number;
+  runtime_guardian_enabled?: boolean;
+  runtime_guardian_status?: "idle" | "monitoring" | "healthy" | "warning" | "critical" | "stopped_by_guardian";
+  runtime_risk_level?: "normal" | "warning" | "critical";
+  last_runtime_check_at?: string | null;
+  last_runtime_check_result?: any;
+  deep_check_interval_minutes?: number;
 }
 
 export interface ProfileCreateData {
@@ -73,6 +84,17 @@ export interface ProfileCreateData {
   auto_sync_timezone_with_proxy?: boolean;
   auto_sync_locale_with_proxy?: boolean;
   auto_sync_geolocation_with_proxy?: boolean;
+  verification_status?: "unverified" | "checking" | "verified" | "warning" | "failed" | "expired";
+  last_verified_at?: string | null;
+  last_verification_result?: string | null;
+  require_verification_before_use?: boolean;
+  verification_expires_minutes?: number;
+  runtime_guardian_enabled?: boolean;
+  runtime_guardian_status?: "idle" | "monitoring" | "healthy" | "warning" | "critical" | "stopped_by_guardian";
+  runtime_risk_level?: "normal" | "warning" | "critical";
+  last_runtime_check_at?: string | null;
+  last_runtime_check_result?: any;
+  deep_check_interval_minutes?: number;
 }
 
 export interface Proxy {
@@ -233,6 +255,12 @@ export const api = {
   deleteProfile: (id: string) =>
     request<{ ok: boolean }>(`/api/profiles/${id}`, { method: "DELETE" }),
 
+  deleteProfilesBatch: (ids: string[]) =>
+    request<{ ok: boolean; deleted_count: number }>("/api/profiles-batch/delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
+
   listProxies: () => request<Proxy[]>("/api/proxies"),
 
   getProxy: (id: string) => request<Proxy>(`/api/proxies/${id}`),
@@ -251,6 +279,12 @@ export const api = {
 
   deleteProxy: (id: string) =>
     request<{ ok: boolean }>(`/api/proxies/${id}`, { method: "DELETE" }),
+
+  deleteProxiesBatch: (ids: string[]) =>
+    request<{ ok: boolean; deleted_count: number }>("/api/proxies-batch/delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
 
   checkProxy: (id: string) =>
     request<ProxyCheckResult>(`/api/proxies/${id}/check`, { method: "POST" }),
@@ -290,6 +324,36 @@ export const api = {
   regenerateFingerprint: (id: string) =>
     request<Profile>(`/api/profiles/${id}/regenerate-fingerprint`, { method: "POST" }),
 
+  verifyProfile: (id: string) =>
+    request<Profile>(`/api/profiles/${id}/verify`, { method: "POST" }),
+
+  getRuntimeStatus: () =>
+    request<Record<string, {
+      runtime_guardian_enabled: boolean;
+      runtime_guardian_status: "idle" | "monitoring" | "healthy" | "warning" | "critical" | "stopped_by_guardian";
+      runtime_risk_level: "normal" | "warning" | "critical";
+      last_runtime_check_at: string | null;
+      last_runtime_check_result: any;
+    }>>("/api/profiles/runtime-status"),
+
+  getRuntimeReport: (id: string) =>
+    request<{
+      profile_id: string;
+      status: string;
+      score: number;
+      checked_at: string | null;
+      checks: {
+        proxy: "pass" | "warning" | "failed";
+        fingerprint: "pass" | "warning" | "failed";
+        headers: "pass" | "warning" | "failed";
+        session: "pass" | "warning" | "failed";
+      };
+      blocking_issues: string[];
+      warnings: string[];
+      action_taken: string;
+    }>(`/api/profiles/${id}/runtime-report`),
+
+
   exportPackage: async (id: string, passphrase?: string | null, include_proxy_secret: boolean = false): Promise<{ export_path?: string } | Blob> => {
     const simulatedRole = localStorage.getItem("cloak_simulated_role") || "user";
     const res = await fetch(`${API_BASE}/api/profiles/${id}/export-package`, {
@@ -315,6 +379,12 @@ export const api = {
       return res.blob();
     }
   },
+
+  overrideWarning: (id: string, reason: string) =>
+    request<Profile>(`/api/profiles/${id}/override-warning`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    }),
 
   importPackage: async (file: File, passphrase?: string | null, mode: "new_profile" | "overwrite" = "new_profile", targetProfileId?: string | null): Promise<{ status: string; profile_id: string }> => {
     const simulatedRole = localStorage.getItem("cloak_simulated_role") || "user";

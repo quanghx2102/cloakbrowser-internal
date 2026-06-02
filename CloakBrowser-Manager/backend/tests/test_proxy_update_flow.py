@@ -91,3 +91,45 @@ def test_proxy_update_flow_and_auto_sync(app_client: TestClient):
         statuses = [row["status"] for row in logs]
         assert "PROXY_CHANGED" in statuses
         assert "FINGERPRINT_UNCHANGED_AFTER_PROXY_CHANGE" in statuses
+
+
+def test_proxy_change_re_verification(app_client: TestClient):
+    # 1. Create a proxy
+    proxy_resp = app_client.post(
+        "/api/proxies",
+        json={
+            "name": "NewMockProxy",
+            "host": "127.0.0.1",
+            "port": 9090,
+            "type": "http",
+        }
+    )
+    assert proxy_resp.status_code == 201
+    proxy_data = proxy_resp.json()
+    proxy_id = proxy_data["id"]
+
+    # 2. Create a profile (stopped, verified)
+    profile_resp = app_client.post(
+        "/api/profiles",
+        json={
+            "name": "ReverifyTest",
+            "verification_status": "verified",
+            "runtime_guardian_status": "monitoring",
+            "verification_expires_on_proxy_change": True,
+        }
+    )
+    assert profile_resp.status_code == 201
+    profile_id = profile_resp.json()["id"]
+
+    # 3. Update the proxy of the stopped profile
+    update_resp = app_client.put(
+        f"/api/profiles/{profile_id}",
+        json={"proxy_id": proxy_id}
+    )
+    assert update_resp.status_code == 200
+    updated_data = update_resp.json()
+
+    # Check status: verification_status becomes expired, and runtime_guardian_status becomes idle
+    assert updated_data["verification_status"] == "expired"
+    assert updated_data["runtime_guardian_status"] == "idle"
+

@@ -97,8 +97,8 @@ interface AppContentProps {
 }
 
 function AppContent({ authRequired, onLogout }: AppContentProps) {
-  const { profiles, loading: profilesLoading, error: profilesError, create: createProfile, update: updateProfile, remove: removeProfile, launch, stop, refresh: refreshProfiles } = useProfiles();
-  const { proxies, loading: proxiesLoading, error: proxiesError, create: createProxy, update: updateProxy, remove: removeProxy, check: checkProxy } = useProxies();
+  const { profiles, loading: profilesLoading, error: profilesError, create: createProfile, update: updateProfile, remove: removeProfile, removeBatch: removeProfileBatch, launch, stop, refresh: refreshProfiles } = useProfiles();
+  const { proxies, loading: proxiesLoading, error: proxiesError, create: createProxy, update: updateProxy, remove: removeProxy, removeBatch: removeProxyBatch, check: checkProxy } = useProxies();
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
@@ -128,6 +128,60 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   }, []);
+
+  const [notifiedCriticals, setNotifiedCriticals] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    profiles.forEach((profile) => {
+      const isCritical = profile.runtime_guardian_status === "critical" || profile.runtime_guardian_status === "stopped_by_guardian" || profile.runtime_risk_level === "critical";
+      if (isCritical) {
+        const currentStatus = profile.runtime_guardian_status || "critical";
+        if (notifiedCriticals[profile.id] !== currentStatus) {
+          setNotifiedCriticals((prev) => ({ ...prev, [profile.id]: currentStatus }));
+          
+          const result = (() => {
+            if (!profile.last_runtime_check_result) return {};
+            try {
+              return typeof profile.last_runtime_check_result === "string"
+                ? JSON.parse(profile.last_runtime_check_result)
+                : profile.last_runtime_check_result;
+            } catch {
+              return {};
+            }
+          })();
+
+          const errCode = result?.error_code || result?.policy_report?.error_code || result?.proxy_check?.status_code;
+          let msg = `Profile "${profile.name}": Phát hiện sự cố bảo mật nghiêm trọng.`;
+          
+          if (profile.runtime_guardian_status === "stopped_by_guardian") {
+            msg = `Profile "${profile.name}": Session đã được lưu sau khi dừng profile.`;
+          } else if (["PROXY_CONNECTION_FAILED", "PROXY_TIMEOUT", "PROXY_AUTH_FAILED", "PROXY_CHECK_FAILED"].includes(errCode)) {
+            msg = `Profile "${profile.name}": Proxy đã mất kết nối. Profile đã được dừng để đảm bảo an toàn.`;
+          } else if (["PROXY_EXIT_IP_CHANGED", "PROXY_COUNTRY_CHANGED", "PROXY_ASN_CHANGED"].includes(errCode)) {
+            msg = `Profile "${profile.name}": IP proxy đã thay đổi ngoài chính sách.`;
+          } else if (["FINGERPRINT_UA_MISMATCH", "HEADERS_MISMATCH_CRITICAL", "FINGERPRINT_WEBGL_MISMATCH", "FINGERPRINT_CANVAS_MISMATCH", "FINGERPRINT_FONT_MISMATCH"].includes(errCode)) {
+            msg = `Profile "${profile.name}": Fingerprint không khớp cấu hình đã khóa.`;
+          } else if (["TLS_CHECK_UNAVAILABLE", "expired"].includes(errCode) || profile.verification_status === "expired") {
+            msg = `Profile "${profile.name}": Kết quả xác minh đã hết hạn. Vui lòng Verify lại profile.`;
+          }
+
+          showToast(msg, "error");
+
+          if (isDesktop && (window as any).electron?.showRuntimeNotification) {
+            const shortBody = msg.replace(`Profile "${profile.name}": `, "");
+            (window as any).electron.showRuntimeNotification({
+              title: "Profile stopped for safety",
+              body: shortBody,
+              profileId: profile.id,
+              severity: "critical"
+            }).catch((err: any) => {
+              console.warn("Failed to show OS notification:", err);
+            });
+          }
+        }
+      }
+    });
+  }, [profiles, notifiedCriticals, showToast]);
 
   const selectedProfile = profiles.find((p) => p.id === selectedProfileId) ?? null;
   const selectedProxy = proxies.find((p) => p.id === selectedProxyId) ?? null;
@@ -372,6 +426,22 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               onLogs={handleLogsProfile}
               onExportClick={handleExportClick}
               onImportClick={handleImportClick}
+              onDelete={async (id) => {
+                try {
+                  await removeProfile(id);
+                  showToast("Xóa profile thành công", "success");
+                } catch (err: any) {
+                  showToast(err.message || "Xóa profile thất bại", "error");
+                }
+              }}
+              onDeleteBatch={async (ids) => {
+                try {
+                  await removeProfileBatch(ids);
+                  showToast("Xóa danh sách profile thành công", "success");
+                } catch (err: any) {
+                  showToast(err.message || "Xóa danh sách profile thất bại", "error");
+                }
+              }}
               isDesktop={isDesktop}
             />
           ) : (
@@ -382,6 +452,22 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               onNew={handleNewProxy}
               onEdit={handleSelectProxy}
               onCheck={handleCheckProxy}
+              onDelete={async (id) => {
+                try {
+                  await removeProxy(id);
+                  showToast("Xóa proxy thành công", "success");
+                } catch (err: any) {
+                  showToast(err.message || "Xóa proxy thất bại", "error");
+                }
+              }}
+              onDeleteBatch={async (ids) => {
+                try {
+                  await removeProxyBatch(ids);
+                  showToast("Xóa danh sách proxy thành công", "success");
+                } catch (err: any) {
+                  showToast(err.message || "Xóa danh sách proxy thất bại", "error");
+                }
+              }}
             />
           )}
         </div>
@@ -423,6 +509,8 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
                 onLaunch={() => handleLaunch()}
                 onStop={() => handleStop()}
                 isDesktop={isDesktop}
+                verificationStatus={selectedProfile.verification_status}
+                requireVerification={selectedProfile.require_verification_before_use}
               />
             )}
             {authRequired && (

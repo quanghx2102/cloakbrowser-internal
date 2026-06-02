@@ -6,11 +6,41 @@ interface LaunchButtonProps {
   onLaunch: () => Promise<void>;
   onStop: () => Promise<void>;
   isDesktop?: boolean;
+  verificationStatus?: "unverified" | "checking" | "verified" | "warning" | "failed" | "expired";
+  requireVerification?: boolean;
 }
 
-export function LaunchButton({ status, onLaunch, onStop, isDesktop }: LaunchButtonProps) {
+export function LaunchButton({
+  status,
+  onLaunch,
+  onStop,
+  isDesktop,
+  verificationStatus = "unverified",
+  requireVerification = true,
+}: LaunchButtonProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const role = localStorage.getItem("cloak_simulated_role") || "user";
+  const isLaunchDisabled = (() => {
+    if (status === "running") return false;
+    if (!requireVerification) return false;
+    if (["failed", "unverified", "expired", "checking"].includes(verificationStatus)) return true;
+    if (verificationStatus === "warning") {
+      return !["admin", "super_admin"].includes(role.toLowerCase());
+    }
+    return false;
+  })();
+
+  const getDisabledReason = () => {
+    if (!requireVerification || status === "running") return "";
+    if (verificationStatus === "unverified") return "Yêu cầu xác thực trước khi mở (Profile chưa xác thực).";
+    if (verificationStatus === "expired") return "Kết quả xác thực đã hết hạn. Vui lòng xác thực lại.";
+    if (verificationStatus === "failed") return "Xác thực thất bại. Vui lòng kiểm tra lại cấu hình và proxy.";
+    if (verificationStatus === "checking") return "Hệ thống đang tiến hành kiểm tra xác thực.";
+    if (verificationStatus === "warning") return "Phát hiện cảnh báo proxy. Chỉ admin/super_admin mới có thể chạy.";
+    return "";
+  };
 
   const handleClick = async () => {
     setLoading(true);
@@ -59,11 +89,25 @@ export function LaunchButton({ status, onLaunch, onStop, isDesktop }: LaunchButt
 
   return (
     <div>
-      <button onClick={handleClick} className="btn-primary flex items-center gap-1.5">
+      <button
+        onClick={handleClick}
+        disabled={isLaunchDisabled}
+        className={`flex items-center gap-1.5 ${
+          isLaunchDisabled
+            ? "bg-gray-700 text-gray-400 border border-gray-600 cursor-not-allowed opacity-50 px-4 py-2 rounded-lg text-xs font-semibold"
+            : "btn-primary"
+        }`}
+      >
         <Play className="h-3.5 w-3.5" />
         <span>{isDesktop ? "Mở CloakBrowser" : "Khởi chạy"}</span>
       </button>
+      {isLaunchDisabled && (
+        <p className="text-amber-500 text-[10px] mt-1 font-medium max-w-[280px]">
+          {getDisabledReason()}
+        </p>
+      )}
       {error && <p className="text-red-400 text-xs mt-1">{error}</p>}
     </div>
   );
 }
+

@@ -27,6 +27,150 @@ except ImportError:
 logger = logging.getLogger("cloakbrowser.manager.browser")
 
 
+class LocalSocks5Bridge:
+    def __init__(self, upstream_host, upstream_port, username=None, password=None):
+        self.upstream_host = upstream_host
+        self.upstream_port = upstream_port
+        self.username = username
+        self.password = password
+        self.server = None
+        self.port = 0
+
+    async def start(self) -> int:
+        self.server = await asyncio.start_server(self.handle_client, '127.0.0.1', 0)
+        self.port = self.server.sockets[0].getsockname()[1]
+        logger.info(f"Started local SOCKS5 bridge on 127.0.0.1:{self.port} forwarding to {self.upstream_host}:{self.upstream_port}")
+        return self.port
+
+    async def stop(self):
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            logger.info(f"Stopped local SOCKS5 bridge on port {self.port}")
+
+    async def handle_client(self, reader, writer):
+        try:
+            ver = await reader.readexactly(1)
+            if ver != b'\x05':
+                writer.close()
+                return
+            nmethods_raw = await reader.readexactly(1)
+            nmethods = nmethods_raw[0]
+            methods = await reader.readexactly(nmethods)
+
+            writer.write(b'\x05\x00')
+            await writer.drain()
+
+            req_header = await reader.readexactly(4)
+            cmd = req_header[1]
+            atyp = req_header[3]
+
+            if atyp == 0x01:
+                dest_addr = socket.inet_ntoa(await reader.readexactly(4))
+            elif atyp == 0x03:
+                addr_len_raw = await reader.readexactly(1)
+                addr_len = addr_len_raw[0]
+                dest_addr = (await reader.readexactly(addr_len)).decode('utf-8')
+            elif atyp == 0x04:
+                dest_addr = socket.inet_ntop(socket.AF_INET6, await reader.readexactly(16))
+            else:
+                writer.close()
+                return
+
+            dest_port_raw = await reader.readexactly(2)
+            dest_port = int.from_bytes(dest_port_raw, 'big')
+
+            try:
+                up_reader, up_writer = await asyncio.open_connection(self.upstream_host, self.upstream_port)
+            except Exception as e:
+                logger.error(f"Bridge failed to connect to upstream: {e}")
+                writer.close()
+                return
+
+            if self.username and self.password:
+                up_writer.write(b'\x05\x01\x02')
+                await up_writer.drain()
+
+                up_ver = await up_reader.readexactly(1)
+                up_method = await up_reader.readexactly(1)
+
+                if up_method != b'\x02':
+                    logger.error("Upstream proxy did not accept user/pass auth")
+                    up_writer.close()
+                    writer.close()
+                    return
+
+                user_bytes = self.username.encode('utf-8')
+                pass_bytes = self.password.encode('utf-8')
+                auth_req = b'\x01' + bytes([len(user_bytes)]) + user_bytes + bytes([len(pass_bytes)]) + pass_bytes
+                up_writer.write(auth_req)
+                await up_writer.drain()
+
+                auth_ver = await up_reader.readexactly(1)
+                auth_status = await up_reader.readexactly(1)
+                if auth_status != b'\x00':
+                    logger.error("Upstream proxy auth failed")
+                    up_writer.close()
+                    writer.close()
+                    return
+            else:
+                up_writer.write(b'\x05\x01\x00')
+                await up_writer.drain()
+
+                up_ver = await up_reader.readexactly(1)
+                up_method = await up_reader.readexactly(1)
+
+            atyp_byte = bytes([atyp])
+            if atyp == 0x01:
+                addr_bytes = socket.inet_aton(dest_addr)
+            elif atyp == 0x03:
+                addr_bytes = bytes([len(dest_addr.encode('utf-8'))]) + dest_addr.encode('utf-8')
+            elif atyp == 0x04:
+                addr_bytes = socket.inet_pton(socket.AF_INET6, dest_addr)
+
+            connect_req = b'\x05' + bytes([cmd]) + b'\x00' + atyp_byte + addr_bytes + dest_port_raw
+            up_writer.write(connect_req)
+            await up_writer.drain()
+
+            up_resp = await up_reader.readexactly(4)
+            up_resp_atyp = up_resp[3]
+            if up_resp_atyp == 0x01:
+                up_resp_addr = await up_reader.readexactly(4)
+            elif up_resp_atyp == 0x03:
+                up_resp_len = await up_reader.readexactly(1)
+                up_resp_addr = await up_reader.readexactly(up_resp_len[0])
+            elif up_resp_atyp == 0x04:
+                up_resp_addr = await up_reader.readexactly(16)
+            up_resp_port = await up_reader.readexactly(2)
+
+            writer.write(up_resp + up_resp_addr + up_resp_port)
+            await writer.drain()
+
+            async def forward(src_r, dst_w):
+                try:
+                    while True:
+                        data = await src_r.read(8192)
+                        if not data:
+                            break
+                        dst_w.write(data)
+                        await dst_w.drain()
+                except Exception:
+                    pass
+                finally:
+                    dst_w.close()
+
+            await asyncio.gather(
+                forward(reader, up_writer),
+                forward(up_reader, writer)
+            )
+
+        except Exception as e:
+            logger.error(f"Bridge error: {e}")
+        finally:
+            writer.close()
+
+
+
 def _normalize_proxy(raw: str) -> str:
     """Convert common proxy formats to scheme://user:pass@host:port.
 
@@ -196,6 +340,7 @@ class BrowserManager:
         self._next_cdp_port = BASE_CDP_PORT
         self._auto_launch_task: asyncio.Task | None = None
         self.is_desktop = os.environ.get("CLOAK_DESKTOP", "0") == "1"
+        self.proxy_bridges = {}
 
     async def launch(self, profile: dict[str, Any]) -> RunningProfile:
         """Launch a browser instance for the given profile."""
@@ -293,6 +438,21 @@ class BrowserManager:
 
             if proxy:
                 _validate_proxy(proxy)
+                if self.is_desktop:
+                    from cloakbrowser.browser import _is_socks_proxy
+                    if _is_socks_proxy(proxy):
+                        from urllib.parse import urlparse
+                        parsed = urlparse(proxy)
+                        if parsed.username and parsed.password:
+                            bridge = LocalSocks5Bridge(
+                                upstream_host=parsed.hostname,
+                                upstream_port=parsed.port,
+                                username=parsed.username,
+                                password=parsed.password
+                            )
+                            local_port = await bridge.start()
+                            proxy = f"socks5://127.0.0.1:{local_port}"
+                            self.proxy_bridges[profile_id] = bridge
 
             binary_path = None
             path_configured = False
@@ -429,7 +589,12 @@ class BrowserManager:
                 )
                 chrome_args.extend(stealth_chrome_args)
                 if proxy:
-                    chrome_args.append(f"--proxy-server={proxy}")
+                    from cloakbrowser.browser import _normalize_socks_string_url, _normalize_http_string_url, _is_socks_proxy
+                    if _is_socks_proxy(proxy):
+                        normalized_proxy = _normalize_socks_string_url(proxy)
+                    else:
+                        normalized_proxy = _normalize_http_string_url(proxy)
+                    chrome_args.append(f"--proxy-server={normalized_proxy}")
                 if user_agent := (profile.get("user_agent") or None):
                     chrome_args.append(f"--user-agent={user_agent}")
 
@@ -587,9 +752,15 @@ class BrowserManager:
                     duration_ms=duration
                 )
 
+            from backend.runtime_guardian import start_runtime_guardian
+            start_runtime_guardian(profile_id, self)
+
             return running
 
         except BaseException as exc:
+            bridge = self.proxy_bridges.pop(profile_id, None)
+            if bridge:
+                await bridge.stop()
             async with self._lock:
                 if self.statuses.get(profile_id) not in ("stopped", "stopping"):
                     self.statuses[profile_id] = "failed"
@@ -626,6 +797,13 @@ class BrowserManager:
             profile = db.get_profile(profile_id)
             if profile and bool(profile.get("session_auto_save", True)):
                 db.update_profile(profile_id, last_session_save_at=db._now())
+                log_activity(
+                    module="browser_manager",
+                    action="SESSION_SAVED_ON_STOP",
+                    status="success",
+                    message=f"Session auto-saved on stop for profile {profile_id}",
+                    profile_id=profile_id
+                )
         except Exception as e:
             logger.warning(f"Failed to update last_session_save_at for profile {profile_id}: {e}")
 
@@ -640,6 +818,8 @@ class BrowserManager:
         if running:
             # Reached if browser was closed externally (normal close by user or window closed)
             self._save_session_timestamp(profile_id)
+            from backend.runtime_guardian import stop_runtime_guardian
+            stop_runtime_guardian(profile_id)
             async with self._lock:
                 self.statuses[profile_id] = "stopped"
             log_activity(
@@ -681,6 +861,8 @@ class BrowserManager:
                     )
                 return
             self.statuses[profile_id] = "stopping"
+            from backend.runtime_guardian import stop_runtime_guardian
+            stop_runtime_guardian(profile_id)
 
         if not self.is_desktop:
             log_activity("browser_manager", "stop_profile", "stopping", f"Stopping profile {profile_id}", profile_id)
@@ -709,6 +891,7 @@ class BrowserManager:
             if running.pid and not process_alive:
                 async with self._lock:
                     self.statuses[profile_id] = "stopped"
+                self._save_session_timestamp(profile_id)
                 if self.is_desktop:
                     log_activity(
                         module="browser_manager",
@@ -876,6 +1059,10 @@ class BrowserManager:
                 )
             else:
                 log_error("browser_manager", "stop_profile", "BROWSER_STOP_FAILED", f"Exception during stop for profile {profile_id}: {e}", profile_id)
+        finally:
+            bridge = self.proxy_bridges.pop(profile_id, None)
+            if bridge:
+                await bridge.stop()
 
     async def restart(self, profile: dict[str, Any]):
         """Restart a browser instance by stopping it fully and launching again."""

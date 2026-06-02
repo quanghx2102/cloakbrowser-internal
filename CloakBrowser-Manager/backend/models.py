@@ -36,6 +36,31 @@ class ProfileCreate(BaseModel):
     auto_sync_timezone_with_proxy: bool = False
     auto_sync_locale_with_proxy: bool = False
     auto_sync_geolocation_with_proxy: bool = False
+    proxy_mode: Literal["static_residential", "sticky_residential", "rotating", "datacenter_static"] = "static_residential"
+    expected_exit_ip: str | None = None
+    expected_country: str | None = None
+    expected_asn: str | None = None
+    allow_ip_rotation: bool = False
+    allowed_rotation_scope: Literal["same_ip", "same_country", "same_asn"] = "same_ip"
+    proxy_sticky_session_ttl_minutes: int | None = None
+    verification_expires_on_proxy_change: bool = True
+    verification_status: Literal["unverified", "checking", "verified", "warning", "failed", "expired"] = "unverified"
+    last_verified_at: str | None = None
+    last_verification_result: str | None = None
+    require_verification_before_use: bool = True
+    verification_expires_minutes: int = 60
+    runtime_guardian_enabled: bool = True
+    runtime_guardian_status: Literal["idle", "monitoring", "healthy", "warning", "critical", "stopped_by_guardian"] = "idle"
+    runtime_risk_level: Literal["normal", "warning", "critical"] = "normal"
+    last_runtime_check_at: str | None = None
+    last_runtime_check_result: str | None = None
+    runtime_check_interval_seconds: int = 60
+    deep_check_interval_minutes: int = 10
+    runtime_action_on_critical: Literal["stop_profile", "warn_only"] = "stop_profile"
+    last_runtime_issue: str | None = None
+    last_runtime_message: str | None = None
+
+
 
 
 class ProfileUpdate(BaseModel):
@@ -67,6 +92,31 @@ class ProfileUpdate(BaseModel):
     auto_sync_timezone_with_proxy: bool | None = None
     auto_sync_locale_with_proxy: bool | None = None
     auto_sync_geolocation_with_proxy: bool | None = None
+    proxy_mode: Literal["static_residential", "sticky_residential", "rotating", "datacenter_static"] | None = None
+    expected_exit_ip: str | None = Field(default=None)
+    expected_country: str | None = Field(default=None)
+    expected_asn: str | None = Field(default=None)
+    allow_ip_rotation: bool | None = None
+    allowed_rotation_scope: Literal["same_ip", "same_country", "same_asn"] | None = None
+    proxy_sticky_session_ttl_minutes: int | None = Field(default=None)
+    verification_expires_on_proxy_change: bool | None = None
+    verification_status: Literal["unverified", "checking", "verified", "warning", "failed", "expired"] | None = None
+    last_verified_at: str | None = Field(default=None)
+    last_verification_result: str | None = Field(default=None)
+    require_verification_before_use: bool | None = None
+    verification_expires_minutes: int | None = None
+    runtime_guardian_enabled: bool | None = None
+    runtime_guardian_status: Literal["idle", "monitoring", "healthy", "warning", "critical", "stopped_by_guardian"] | None = None
+    runtime_risk_level: Literal["normal", "warning", "critical"] | None = None
+    last_runtime_check_at: str | None = Field(default=None)
+    last_runtime_check_result: str | None = Field(default=None)
+    runtime_check_interval_seconds: int | None = None
+    deep_check_interval_minutes: int | None = None
+    runtime_action_on_critical: Literal["stop_profile", "warn_only"] | None = None
+    last_runtime_issue: str | None = Field(default=None)
+    last_runtime_message: str | None = Field(default=None)
+
+
 
 
 class TagCreate(BaseModel):
@@ -108,6 +158,31 @@ class ProfileResponse(BaseModel):
     last_fingerprint_change_at: str | None = None
     last_session_save_at: str | None = None
     last_proxy_change_at: str | None = None
+    proxy_mode: str = "static_residential"
+    expected_exit_ip: str | None = None
+    expected_country: str | None = None
+    expected_asn: str | None = None
+    allow_ip_rotation: bool = False
+    allowed_rotation_scope: str = "same_ip"
+    proxy_sticky_session_ttl_minutes: int | None = None
+    verification_expires_on_proxy_change: bool = True
+    verification_status: str = "unverified"
+    last_verified_at: str | None = None
+    last_verification_result: str | None = None
+    require_verification_before_use: bool = True
+    verification_expires_minutes: int = 60
+    runtime_guardian_enabled: bool = True
+    runtime_guardian_status: str = "idle"
+    runtime_risk_level: str = "normal"
+    last_runtime_check_at: str | None = None
+    last_runtime_check_result: str | None = None
+    runtime_check_interval_seconds: int = 60
+    deep_check_interval_minutes: int = 10
+    runtime_action_on_critical: str = "stop_profile"
+    last_runtime_issue: str | None = None
+    last_runtime_message: str | None = None
+
+
 
     @field_validator("clipboard_sync", mode="before")
     @classmethod
@@ -252,3 +327,32 @@ class ProfileRestoreRequest(BaseModel):
 class RestoreResponse(BaseModel):
     ok: bool
     message: str
+
+
+class RuntimeReportChecks(BaseModel):
+    proxy: Literal["pass", "warning", "failed"]
+    fingerprint: Literal["pass", "warning", "failed"]
+    headers: Literal["pass", "warning", "failed"]
+    session: Literal["pass", "warning", "failed"]
+
+
+class RuntimeReportResponse(BaseModel):
+    profile_id: str
+    status: str
+    score: int
+    checked_at: str | None = None
+    checks: RuntimeReportChecks
+    blocking_issues: list[str]
+    warnings: list[str]
+    action_taken: str
+
+
+class OverrideWarningRequest(BaseModel):
+    reason: str
+
+
+class BatchDeleteRequest(BaseModel):
+    ids: list[str]
+
+
+

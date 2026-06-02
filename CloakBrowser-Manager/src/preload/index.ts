@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld('electron', {
   getBinaryStatus: () => ipcRenderer.invoke('get-binary-status'),
   selectBinary: () => ipcRenderer.invoke('select-binary'),
   saveBinaryPath: (path: string) => ipcRenderer.invoke('save-binary-path'),
+  showRuntimeNotification: (data: { title: string; body: string; profileId: string; severity: string }) =>
+    ipcRenderer.invoke('show-runtime-notification', data),
 });

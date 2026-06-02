@@ -18,12 +18,41 @@ export function useProfiles() {
     }
   }, []);
 
+  const pollRuntimeStatus = useCallback(async () => {
+    try {
+      const statusMap = await api.getRuntimeStatus();
+      setProfiles((prev) =>
+        prev.map((p) => {
+          const status = statusMap[p.id];
+          if (status) {
+            return {
+              ...p,
+              runtime_guardian_enabled: status.runtime_guardian_enabled,
+              runtime_guardian_status: status.runtime_guardian_status,
+              runtime_risk_level: status.runtime_risk_level,
+              last_runtime_check_at: status.last_runtime_check_at,
+              last_runtime_check_result: status.last_runtime_check_result,
+            };
+          }
+          return p;
+        })
+      );
+    } catch (err) {
+      console.warn("Failed to poll runtime guardian status:", err);
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
     // Poll for status changes every 3 seconds
     const interval = setInterval(refresh, 3000);
-    return () => clearInterval(interval);
-  }, [refresh]);
+    // Poll specifically for runtime guardian status every 5 seconds
+    const guardianInterval = setInterval(pollRuntimeStatus, 5000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(guardianInterval);
+    };
+  }, [refresh, pollRuntimeStatus]);
 
   const create = useCallback(
     async (data: ProfileCreateData): Promise<Profile> => {
@@ -66,6 +95,19 @@ export function useProfiles() {
     [],
   );
 
+  const removeBatch = useCallback(
+    async (ids: string[]) => {
+      try {
+        await api.deleteProfilesBatch(ids);
+        setProfiles((prev) => prev.filter((p) => !ids.includes(p.id)));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Failed to delete profiles");
+        throw err;
+      }
+    },
+    [],
+  );
+
   const launch = useCallback(
     async (id: string) => {
       try {
@@ -91,5 +133,5 @@ export function useProfiles() {
     [refresh],
   );
 
-  return { profiles, loading, error, refresh, create, update, remove, launch, stop };
+  return { profiles, loading, error, refresh, create, update, remove, removeBatch, launch, stop };
 }

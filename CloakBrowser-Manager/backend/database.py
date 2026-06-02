@@ -90,7 +90,30 @@ def init_db():
                 auto_sync_geolocation_with_proxy BOOLEAN DEFAULT 0,
                 last_fingerprint_change_at TEXT,
                 last_session_save_at TEXT,
-                last_proxy_change_at TEXT
+                last_proxy_change_at TEXT,
+                proxy_mode TEXT DEFAULT 'static_residential',
+                expected_exit_ip TEXT,
+                expected_country TEXT,
+                expected_asn TEXT,
+                allow_ip_rotation BOOLEAN DEFAULT 0,
+                allowed_rotation_scope TEXT DEFAULT 'same_ip',
+                proxy_sticky_session_ttl_minutes INTEGER,
+                verification_expires_on_proxy_change BOOLEAN DEFAULT 1,
+                verification_status TEXT DEFAULT 'unverified',
+                last_verified_at TEXT,
+                last_verification_result TEXT,
+                require_verification_before_use BOOLEAN DEFAULT 1,
+                verification_expires_minutes INTEGER DEFAULT 60,
+                runtime_guardian_enabled BOOLEAN DEFAULT 1,
+                runtime_guardian_status TEXT DEFAULT 'idle',
+                runtime_risk_level TEXT DEFAULT 'normal',
+                last_runtime_check_at TEXT,
+                last_runtime_check_result TEXT,
+                runtime_check_interval_seconds INTEGER DEFAULT 60,
+                deep_check_interval_minutes INTEGER DEFAULT 10,
+                runtime_action_on_critical TEXT DEFAULT 'stop_profile',
+                last_runtime_issue TEXT,
+                last_runtime_message TEXT
             );
 
             CREATE TABLE IF NOT EXISTS profile_tags (
@@ -176,6 +199,75 @@ def init_db():
         if "last_proxy_change_at" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN last_proxy_change_at TEXT")
             conn.commit()
+        if "proxy_mode" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN proxy_mode TEXT DEFAULT 'static_residential'")
+            conn.commit()
+        if "expected_exit_ip" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN expected_exit_ip TEXT")
+            conn.commit()
+        if "expected_country" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN expected_country TEXT")
+            conn.commit()
+        if "expected_asn" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN expected_asn TEXT")
+            conn.commit()
+        if "allow_ip_rotation" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN allow_ip_rotation BOOLEAN DEFAULT 0")
+            conn.commit()
+        if "allowed_rotation_scope" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN allowed_rotation_scope TEXT DEFAULT 'same_ip'")
+            conn.commit()
+        if "proxy_sticky_session_ttl_minutes" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN proxy_sticky_session_ttl_minutes INTEGER")
+            conn.commit()
+        if "verification_expires_on_proxy_change" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN verification_expires_on_proxy_change BOOLEAN DEFAULT 1")
+            conn.commit()
+        if "verification_status" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN verification_status TEXT DEFAULT 'unverified'")
+            conn.commit()
+        if "last_verified_at" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_verified_at TEXT")
+            conn.commit()
+        if "last_verification_result" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_verification_result TEXT")
+            conn.commit()
+        if "require_verification_before_use" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN require_verification_before_use BOOLEAN DEFAULT 1")
+            conn.commit()
+        if "verification_expires_minutes" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN verification_expires_minutes INTEGER DEFAULT 60")
+            conn.commit()
+        if "runtime_guardian_enabled" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN runtime_guardian_enabled BOOLEAN DEFAULT 1")
+            conn.commit()
+        if "runtime_guardian_status" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN runtime_guardian_status TEXT DEFAULT 'idle'")
+            conn.commit()
+        if "runtime_risk_level" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN runtime_risk_level TEXT DEFAULT 'normal'")
+            conn.commit()
+        if "last_runtime_check_at" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_runtime_check_at TEXT")
+            conn.commit()
+        if "last_runtime_check_result" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_runtime_check_result TEXT")
+            conn.commit()
+        if "runtime_check_interval_seconds" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN runtime_check_interval_seconds INTEGER DEFAULT 60")
+            conn.commit()
+        if "deep_check_interval_minutes" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN deep_check_interval_minutes INTEGER DEFAULT 10")
+            conn.commit()
+        if "runtime_action_on_critical" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN runtime_action_on_critical TEXT DEFAULT 'stop_profile'")
+            conn.commit()
+        if "last_runtime_issue" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_runtime_issue TEXT")
+            conn.commit()
+        if "last_runtime_message" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN last_runtime_message TEXT")
+            conn.commit()
             
         proxy_cols = {row[1] for row in conn.execute("PRAGMA table_info(proxies)").fetchall()}
         if "latency_ms" not in proxy_cols:
@@ -214,9 +306,18 @@ def create_profile(
                 user_data_dir, created_at, updated_at,
                 fingerprint_locked, session_auto_save,
                 auto_sync_timezone_with_proxy, auto_sync_locale_with_proxy, auto_sync_geolocation_with_proxy,
-                last_fingerprint_change_at, last_session_save_at, last_proxy_change_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
+                last_fingerprint_change_at, last_session_save_at, last_proxy_change_at,
+                proxy_mode, expected_exit_ip, expected_country, expected_asn,
+                allow_ip_rotation, allowed_rotation_scope, proxy_sticky_session_ttl_minutes,
+                verification_expires_on_proxy_change,
+                verification_status, last_verified_at, last_verification_result,
+                require_verification_before_use, verification_expires_minutes,
+                 runtime_guardian_enabled, runtime_guardian_status, runtime_risk_level,
+                 last_runtime_check_at, last_runtime_check_result, runtime_check_interval_seconds,
+                 deep_check_interval_minutes,
+                 runtime_action_on_critical, last_runtime_issue, last_runtime_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+            , (
                 profile_id, name, seed,
                 fields.get("proxy"),
                 fields.get("proxy_id"),
@@ -247,6 +348,29 @@ def create_profile(
                 now if fingerprint_seed is not None else None,
                 None,
                 now if (fields.get("proxy") or fields.get("proxy_id")) else None,
+                fields.get("proxy_mode", "static_residential"),
+                fields.get("expected_exit_ip"),
+                fields.get("expected_country"),
+                fields.get("expected_asn"),
+                fields.get("allow_ip_rotation", False),
+                fields.get("allowed_rotation_scope", "same_ip"),
+                fields.get("proxy_sticky_session_ttl_minutes"),
+                fields.get("verification_expires_on_proxy_change", True),
+                fields.get("verification_status", "unverified"),
+                fields.get("last_verified_at"),
+                fields.get("last_verification_result"),
+                fields.get("require_verification_before_use", True),
+                fields.get("verification_expires_minutes", 60),
+                fields.get("runtime_guardian_enabled", True),
+                fields.get("runtime_guardian_status", "idle"),
+                fields.get("runtime_risk_level", "normal"),
+                fields.get("last_runtime_check_at"),
+                fields.get("last_runtime_check_result"),
+                fields.get("runtime_check_interval_seconds", 60),
+                fields.get("deep_check_interval_minutes", 10),
+                fields.get("runtime_action_on_critical", "stop_profile"),
+                fields.get("last_runtime_issue"),
+                fields.get("last_runtime_message"),
             ),
         )
         for t in tags:
@@ -318,6 +442,15 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "fingerprint_locked", "session_auto_save",
         "auto_sync_timezone_with_proxy", "auto_sync_locale_with_proxy", "auto_sync_geolocation_with_proxy",
         "last_fingerprint_change_at", "last_session_save_at", "last_proxy_change_at",
+        "proxy_mode", "expected_exit_ip", "expected_country", "expected_asn",
+        "allow_ip_rotation", "allowed_rotation_scope", "proxy_sticky_session_ttl_minutes",
+        "verification_expires_on_proxy_change",
+        "verification_status", "last_verified_at", "last_verification_result",
+        "require_verification_before_use", "verification_expires_minutes",
+        "runtime_guardian_enabled", "runtime_guardian_status", "runtime_risk_level",
+        "last_runtime_check_at", "last_runtime_check_result", "runtime_check_interval_seconds",
+        "deep_check_interval_minutes",
+        "runtime_action_on_critical", "last_runtime_issue", "last_runtime_message",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")

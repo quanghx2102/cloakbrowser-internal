@@ -59,6 +59,17 @@ export function useProxies() {
     }
   }, []);
 
+  const removeBatch = useCallback(async (ids: string[]) => {
+    try {
+      setError(null);
+      await api.deleteProxiesBatch(ids);
+      setProxies((prev) => prev.filter((p) => !ids.includes(p.id)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete proxies");
+      throw err;
+    }
+  }, []);
+
   const check = useCallback(async (id: string) => {
     try {
       setError(null);
@@ -78,6 +89,7 @@ export function useProxies() {
     create,
     update,
     remove,
+    removeBatch,
     check,
     refresh: fetchProxies,
   };

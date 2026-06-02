@@ -139,7 +139,7 @@ def test_launch_not_found(app_client: TestClient):
 
 
 def test_launch_already_running(app_client: TestClient):
-    create = app_client.post("/api/profiles", json={"name": "Running"})
+    create = app_client.post("/api/profiles", json={"name": "Running", "require_verification_before_use": False})
     pid = create.json()["id"]
     # Inject into running dict
     main.browser_mgr.running[pid] = MagicMock(spec=RunningProfile)
@@ -151,7 +151,7 @@ def test_launch_already_running(app_client: TestClient):
 
 def test_launch_invalid_proxy_400(app_client: TestClient):
     """ValueError from browser_mgr.launch should map to 400."""
-    create = app_client.post("/api/profiles", json={"name": "BadProxy"})
+    create = app_client.post("/api/profiles", json={"name": "BadProxy", "require_verification_before_use": False})
     pid = create.json()["id"]
     with patch.object(main.browser_mgr, "launch", AsyncMock(side_effect=ValueError("Invalid proxy scheme 'ftp'"))):
         resp = app_client.post(f"/api/profiles/{pid}/launch")
@@ -161,7 +161,7 @@ def test_launch_invalid_proxy_400(app_client: TestClient):
 
 def test_launch_failure_500(app_client: TestClient):
     """Generic exception from browser_mgr.launch should map to 500."""
-    create = app_client.post("/api/profiles", json={"name": "Crash"})
+    create = app_client.post("/api/profiles", json={"name": "Crash", "require_verification_before_use": False})
     pid = create.json()["id"]
     with patch.object(main.browser_mgr, "launch", AsyncMock(side_effect=RuntimeError("Xvnc failed"))):
         resp = app_client.post(f"/api/profiles/{pid}/launch")

@@ -8,7 +8,7 @@ from backend.browser_manager import RunningProfile
 def test_resource_limit_reached(app_client: TestClient):
     # Set limit to 2 running profiles
     with patch.dict(os.environ, {"MAX_RUNNING_PROFILES": "2"}):
-        create = app_client.post("/api/profiles", json={"name": "P3"})
+        create = app_client.post("/api/profiles", json={"name": "P3", "require_verification_before_use": False})
         pid = create.json()["id"]
 
         # Mock browser_mgr.statuses to simulate 2 profiles already running/starting
@@ -43,7 +43,7 @@ def test_resource_limit_reached(app_client: TestClient):
 def test_resource_limit_not_reached(app_client: TestClient):
     # Set limit to 2 running profiles
     with patch.dict(os.environ, {"MAX_RUNNING_PROFILES": "2"}):
-        create = app_client.post("/api/profiles", json={"name": "P2"})
+        create = app_client.post("/api/profiles", json={"name": "P2", "require_verification_before_use": False})
         pid = create.json()["id"]
 
         # Mock browser_mgr.statuses to simulate 1 profile running (under limit)

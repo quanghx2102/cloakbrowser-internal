@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import json
 import logging
 import os
 import struct
@@ -46,9 +47,10 @@ try:
         BackupResponse,
         BackupCreateResponse,
         ProfileBackupResponse,
-        RestoreRequest,
-        ProfileRestoreRequest,
         RestoreResponse,
+        RuntimeReportResponse,
+        OverrideWarningRequest,
+        BatchDeleteRequest,
     )
     from .proxy_checker import check_proxy
     from .logger_utils import log_activity, log_error
@@ -77,6 +79,9 @@ except ImportError:
         RestoreRequest,
         ProfileRestoreRequest,
         RestoreResponse,
+        RuntimeReportResponse,
+        OverrideWarningRequest,
+        BatchDeleteRequest,
     )
     from backend.proxy_checker import check_proxy
     from backend.logger_utils import log_activity, log_error
@@ -497,7 +502,12 @@ async def auth_logout(request: Request, response: Response):
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])
-async def list_profiles():
+async def list_profiles(
+    response: Response,
+    page: int | None = None,
+    limit: int | None = None,
+    search: str | None = None
+):
     profiles = db.list_profiles()
     result = []
     for p in profiles:
@@ -506,8 +516,27 @@ async def list_profiles():
         p["vnc_ws_port"] = status["vnc_ws_port"]
         p["cdp_url"] = status["cdp_url"]
         p["tags"] = [TagResponse(**t) for t in p.get("tags", [])]
-        result.append(ProfileResponse(**p))
-    return result
+        result.append(p)
+        
+    if search:
+        search_lower = search.lower()
+        result = [
+            p for p in result
+            if search_lower in p["name"].lower() or (p["proxy"] and search_lower in p["proxy"].lower())
+        ]
+        
+    total_count = len(result)
+    
+    if page is not None and limit is not None:
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        result = result[start_idx:end_idx]
+        
+    response.headers["x-total-count"] = str(total_count)
+    response.headers["Access-Control-Expose-Headers"] = "x-total-count"
+    
+    return [ProfileResponse(**p) for p in result]
+
 
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
@@ -606,6 +635,107 @@ async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
             proxy_changed = True
         if "proxy_id" in data and data["proxy_id"] != existing.get("proxy_id"):
             proxy_changed = True
+
+        profile_status = browser_mgr.get_status(profile_id)["status"]
+
+        if proxy_changed:
+            expires_on_change = data.get("verification_expires_on_proxy_change", existing.get("verification_expires_on_proxy_change", True))
+            if expires_on_change:
+                data["verification_status"] = "expired"
+                if profile_status == "stopped":
+                    data["runtime_guardian_status"] = "idle"
+
+            # 3. Handle runtime proxy change
+            if profile_status in ("running", "starting"):
+                # Resolve new proxy URL
+                new_proxy_url = None
+                new_proxy_id = data.get("proxy_id", existing.get("proxy_id"))
+                new_proxy_str = data.get("proxy", existing.get("proxy"))
+                
+                if new_proxy_id:
+                    proxy_record = db.get_proxy(new_proxy_id)
+                    if proxy_record:
+                        ptype = proxy_record.get("type", "http")
+                        host = proxy_record["host"]
+                        port = proxy_record["port"]
+                        user = proxy_record.get("username")
+                        pwd = proxy_record.get("password")
+                        if user and pwd:
+                            new_proxy_url = f"{ptype}://{user}:{pwd}@{host}:{port}"
+                        else:
+                            new_proxy_url = f"{ptype}://{host}:{port}"
+                elif new_proxy_str:
+                    from backend.browser_manager import _normalize_proxy
+                    new_proxy_url = _normalize_proxy(new_proxy_str)
+
+                current_proxy_result = {"status_code": "PROXY_OK"}
+                if new_proxy_url:
+                    import time
+                    import httpx
+                    start_time = time.monotonic()
+                    try:
+                        async with httpx.AsyncClient(proxy=new_proxy_url, timeout=10.0) as client:
+                            response = await client.get("http://ipinfo.io/json")
+                            if response.status_code == 407:
+                                current_proxy_result = {"status_code": "PROXY_AUTH_FAILED"}
+                            else:
+                                response.raise_for_status()
+                                res_json = response.json()
+                                current_proxy_result = {
+                                    "status_code": "PROXY_OK",
+                                    "last_ip": res_json.get("ip"),
+                                    "country": res_json.get("country"),
+                                    "asn": res_json.get("org"),
+                                    "latency_ms": int((time.monotonic() - start_time) * 1000)
+                                }
+                    except httpx.TimeoutException:
+                        current_proxy_result = {"status_code": "PROXY_TIMEOUT"}
+                    except Exception:
+                        current_proxy_result = {"status_code": "PROXY_CONNECTION_FAILED"}
+
+                # Evaluate proxy policy
+                from backend.profile_verifier import evaluate_proxy_policy
+                eval_profile = {**existing, **data}
+                policy_report = evaluate_proxy_policy(eval_profile, current_proxy_result)
+                
+                if policy_report.get("status") == "critical":
+                    data["runtime_guardian_status"] = "critical"
+                    data["runtime_risk_level"] = "critical"
+                    data["last_runtime_check_result"] = json.dumps({
+                        "status": "critical",
+                        "risk_level": "critical",
+                        "policy_report": policy_report,
+                        "proxy_check": current_proxy_result,
+                        "error_code": policy_report.get("error_code"),
+                        "message": policy_report.get("message")
+                    })
+                    
+                    action_on_critical = eval_profile.get("runtime_action_on_critical", "stop_profile")
+                    if action_on_critical == "stop_profile":
+                        data["runtime_guardian_status"] = "stopped_by_guardian"
+                        import asyncio
+                        asyncio.create_task(browser_mgr.stop(profile_id))
+                        
+                        log_activity(
+                            module="runtime_guardian",
+                            action="PROFILE_STOPPED_BY_GUARDIAN",
+                            status="success",
+                            message=f"Profile stopped automatically by Guardian due to critical risk: {policy_report.get('message')}",
+                            profile_id=profile_id
+                        )
+                
+                elif policy_report.get("status") == "warning" or policy_report.get("verification_expired"):
+                    data["runtime_guardian_status"] = "warning"
+                    data["runtime_risk_level"] = "warning"
+                    data["verification_status"] = "expired"
+                    data["last_runtime_check_result"] = json.dumps({
+                        "status": "warning",
+                        "risk_level": "warning",
+                        "policy_report": policy_report,
+                        "proxy_check": current_proxy_result,
+                        "error_code": policy_report.get("error_code", "PROXY_IP_ROTATED"),
+                        "message": policy_report.get("message")
+                    })
 
         # Check if auto-sync settings were toggled/enabled or if proxy changed
         tz_toggled = data.get("auto_sync_timezone_with_proxy") is True and not existing.get("auto_sync_timezone_with_proxy")
@@ -732,6 +862,53 @@ async def delete_profile(profile_id: str):
         raise HTTPException(status_code=500, detail={"error_code": "PROFILE_DELETE_FAILED", "message": str(exc)})
 
 
+
+@app.post("/api/profiles-batch/delete")
+async def batch_delete_profiles(req: BatchDeleteRequest):
+    # Check if any profile is currently running/starting/stopping
+    active_ids = []
+    for pid in req.ids:
+        status = browser_mgr.get_status(pid)["status"]
+        if status in ("starting", "running", "stopping"):
+            active_ids.append(pid)
+            
+    if active_ids:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_code": "PROFILE_LOCKED",
+                "message": f"Cannot delete running/active profiles: {', '.join(active_ids)}"
+            }
+        )
+        
+    deleted_count = 0
+    errors = []
+    for pid in req.ids:
+        try:
+            profile = db.get_profile(pid)
+            if not profile:
+                continue
+            # Stop browser if running
+            await browser_mgr.stop(pid)
+            db.delete_profile(pid)
+            log_activity(
+                module="main",
+                action="delete_profile_batch",
+                status="success",
+                message="Profile deleted successfully via batch delete",
+                profile_id=pid,
+            )
+            deleted_count += 1
+        except Exception as e:
+            errors.append(f"Profile {pid}: {str(e)}")
+            
+    if errors:
+        raise HTTPException(status_code=500, detail={"error_code": "BATCH_DELETE_PARTIAL_FAILED", "message": "; ".join(errors)})
+        
+    return {"ok": True, "deleted_count": deleted_count}
+
+
+
 # ── Proxy CRUD ────────────────────────────────────────────────────────────────
 
 def _mask_proxy(proxy: dict) -> dict:
@@ -741,9 +918,34 @@ def _mask_proxy(proxy: dict) -> dict:
 
 
 @app.get("/api/proxies", response_model=list[ProxyResponse])
-async def list_proxies():
+async def list_proxies(
+    response: Response,
+    page: int | None = None,
+    limit: int | None = None,
+    search: str | None = None
+):
     proxies = db.list_proxies()
-    return [_mask_proxy(p) for p in proxies]
+    result = [_mask_proxy(p) for p in proxies]
+    
+    if search:
+        search_lower = search.lower()
+        result = [
+            p for p in result
+            if search_lower in p["name"].lower() or search_lower in p["host"].lower()
+        ]
+        
+    total_count = len(result)
+    
+    if page is not None and limit is not None:
+        start_idx = (page - 1) * limit
+        end_idx = start_idx + limit
+        result = result[start_idx:end_idx]
+        
+    response.headers["x-total-count"] = str(total_count)
+    response.headers["Access-Control-Expose-Headers"] = "x-total-count"
+    
+    return [ProxyResponse(**p) for p in result]
+
 
 
 @app.post("/api/proxies", response_model=ProxyResponse, status_code=201)
@@ -850,6 +1052,34 @@ async def delete_proxy_route(proxy_id: str):
             proxy_id=proxy_id,
         )
         raise HTTPException(status_code=500, detail={"error_code": "PROXY_DELETE_FAILED", "message": str(exc)})
+
+
+@app.post("/api/proxies-batch/delete")
+async def batch_delete_proxies(req: BatchDeleteRequest):
+    deleted_count = 0
+    errors = []
+    for pid in req.ids:
+        try:
+            proxy = db.get_proxy(pid)
+            if not proxy:
+                continue
+            db.delete_proxy(pid)
+            log_activity(
+                module="main",
+                action="delete_proxy_batch",
+                status="success",
+                message="Proxy deleted successfully via batch delete",
+                proxy_id=pid,
+            )
+            deleted_count += 1
+        except Exception as e:
+            errors.append(f"Proxy {pid}: {str(e)}")
+            
+    if errors:
+        raise HTTPException(status_code=500, detail={"error_code": "BATCH_DELETE_PARTIAL_FAILED", "message": "; ".join(errors)})
+        
+    return {"ok": True, "deleted_count": deleted_count}
+
 
 
 @app.post("/api/proxies/{proxy_id}/check", response_model=ProxyCheckResult)
@@ -1410,14 +1640,270 @@ async def regenerate_fingerprint(profile_id: str, request: Request):
     return ProfileResponse(**profile)
 
 
-@app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)
-async def launch_profile(profile_id: str):
+@app.post("/api/profiles/{profile_id}/verify", response_model=ProfileResponse)
+async def verify_profile(profile_id: str):
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    log_activity(
+        module="profile_verifier",
+        action="PROFILE_VERIFICATION_STARTED",
+        status="success",
+        message=f"Profile verification started for profile {profile_id}",
+        profile_id=profile_id,
+    )
+
+    from backend.profile_verifier import verify_profile_prelaunch
+    report = await verify_profile_prelaunch(existing)
+
+    update_data = {
+        "verification_status": report["status"],
+        "last_verified_at": report["last_verified_at"],
+        "last_verification_result": json.dumps(report)
+    }
+
+    # Store exit node details upon first successful verification
+    if report["status"] == "verified" and not existing.get("expected_exit_ip"):
+        proxy_details = report.get("details", {}).get("proxy", {})
+        if proxy_details.get("status") == "passed":
+            update_data["expected_exit_ip"] = proxy_details.get("ip")
+            update_data["expected_country"] = proxy_details.get("country")
+            update_data["expected_asn"] = proxy_details.get("asn")
+
+    profile = db.update_profile(profile_id, **update_data)
+
+    # Audit logging
+    audit_action = "PROFILE_VERIFICATION_PASSED"
+    if report["status"] == "warning":
+        audit_action = "PROFILE_VERIFICATION_WARNING"
+    elif report["status"] == "failed":
+        audit_action = "PROFILE_VERIFICATION_FAILED"
+
+    log_activity(
+        module="profile_verifier",
+        action=audit_action,
+        status="success" if report["status"] != "failed" else "failed",
+        message=f"Profile verification finished with status: {report['status']}",
+        profile_id=profile_id,
+    )
+
+    return ProfileResponse(**profile)
+
+
+@app.get("/api/profiles/{profile_id}/runtime-report", response_model=RuntimeReportResponse)
+async def get_runtime_report_endpoint(profile_id: str):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+
+    from backend.runtime_guardian import generate_runtime_report
+    report = generate_runtime_report(profile)
+    return RuntimeReportResponse(**report)
+
+
+@app.post("/api/profiles/{profile_id}/override-warning", response_model=ProfileResponse)
+async def override_verification_warning(profile_id: str, body: OverrideWarningRequest, request: Request):
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    role = request.headers.get("x-user-role", "user").lower()
+    if role not in ("admin", "super_admin"):
+        raise HTTPException(status_code=403, detail="Permission denied. Only admins or super_admins can override verification status.")
+
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(status_code=400, detail="Reason is required for override.")
+
+    status = profile.get("verification_status", "unverified")
+
+    if status == "warning":
+        pass
+    elif status in ("failed", "critical", "stopped_by_guardian") or profile.get("runtime_guardian_status") in ("critical", "stopped_by_guardian"):
+        # Super admin can override critical ONLY if ALLOW_CRITICAL_OVERRIDE env var is "true"
+        import os
+        allow_crit = os.environ.get("ALLOW_CRITICAL_OVERRIDE") == "true" or bool(profile.get("allow_critical_override", False))
+        if role == "super_admin" and allow_crit:
+            pass
+        else:
+            raise HTTPException(status_code=403, detail="Critical issues cannot be overridden by default.")
+    else:
+        raise HTTPException(status_code=400, detail=f"Profile is not in a warning or critical state (current status: {status}).")
+
+    now = db._now()
+    updated = db.update_profile(
+        profile_id,
+        verification_status="verified",
+        last_verified_at=now,
+        notes=f"[Override Reason]: {body.reason}\n" + (profile.get("notes") or "")
+    )
+
+    log_activity(
+        module="main",
+        action="ADMIN_OVERRIDE_VERIFICATION_WARNING",
+        status="success",
+        message=f"Admin/Super Admin ({role}) overridden verification warning. Reason: {body.reason}",
+        profile_id=profile_id,
+    )
+
+    return ProfileResponse(**updated)
+
+
+@app.get("/api/profiles/{profile_id}/verification-report")
+async def get_verification_report(profile_id: str):
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    res_str = profile.get("last_verification_result")
+    if not res_str:
+        return {
+            "status": "unverified",
+            "errors": [],
+            "warnings": [],
+            "details": {}
+        }
+    try:
+        return json.loads(res_str)
+    except Exception:
+        return {
+            "status": "unverified",
+            "errors": ["Failed to parse verification result"],
+            "warnings": [],
+            "details": {}
+        }
+
+
+@app.get("/api/profiles/{profile_id}/runtime-status")
+async def get_profile_runtime_status(profile_id: str):
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    res_str = profile.get("last_runtime_check_result")
+    result = {}
+    if res_str:
+        try:
+            result = json.loads(res_str)
+        except Exception:
+            pass
+
+    return {
+        "runtime_guardian_enabled": bool(profile.get("runtime_guardian_enabled", True)),
+        "runtime_guardian_status": profile.get("runtime_guardian_status", "idle"),
+        "runtime_risk_level": profile.get("runtime_risk_level", "normal"),
+        "last_runtime_check_at": profile.get("last_runtime_check_at"),
+        "last_runtime_check_result": result
+    }
+
+
+@app.get("/api/profiles/runtime-status")
+async def get_all_profiles_runtime_status():
+    profiles = db.list_profiles()
+    status_map = {}
+    for p in profiles:
+        res_str = p.get("last_runtime_check_result")
+        result = {}
+        if res_str:
+            try:
+                result = json.loads(res_str)
+            except Exception:
+                pass
+        status_map[p["id"]] = {
+            "runtime_guardian_enabled": bool(p.get("runtime_guardian_enabled", True)),
+            "runtime_guardian_status": p.get("runtime_guardian_status", "idle"),
+            "runtime_risk_level": p.get("runtime_risk_level", "normal"),
+            "last_runtime_check_at": p.get("last_runtime_check_at"),
+            "last_runtime_check_result": result
+        }
+    return status_map
+
+
+@app.post("/api/profiles/{profile_id}/runtime-guardian/check-now")
+async def runtime_guardian_check_now(profile_id: str):
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    from backend.runtime_guardian import run_lightweight_check
+    res = await run_lightweight_check(profile_id, browser_mgr)
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    status_map = {
+        "healthy": "healthy",
+        "warning": "warning",
+        "critical": "critical"
+    }
+    guardian_status = status_map.get(res["status"], "healthy")
+    if res["status"] == "dead":
+        guardian_status = "idle"
+
+    updated = db.update_profile(
+        profile_id,
+        runtime_guardian_status=guardian_status,
+        runtime_risk_level=res["risk_level"] if res["status"] != "dead" else "normal",
+        last_runtime_check_at=now,
+        last_runtime_check_result=json.dumps(res)
+    )
+
+    if res["risk_level"] == "critical":
+        log_error(
+            module="runtime_guardian",
+            action="check_now",
+            error_code=res["policy_report"].get("error_code", "PROXY_POLICY_VIOLATION"),
+            message=f"CRITICAL proxy violation on manual check: {res['policy_report'].get('message')}. Stopping profile.",
+            profile_id=profile_id
+        )
+        db.update_profile(profile_id, runtime_guardian_status="stopped_by_guardian")
+        asyncio.create_task(browser_mgr.stop(profile_id))
+
+    return {
+        "ok": True,
+        "check_result": res,
+        "profile": ProfileResponse(**updated)
+    }
+
+
+
+
+
+@app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)
+async def launch_profile(profile_id: str, request: Request):
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    role = request.headers.get("x-user-role", "user").lower()
+    from backend.profile_verifier import can_launch_profile
+    allowed, error_code = can_launch_profile(profile, role)
+    if not allowed:
+        log_error(
+            module="main",
+            action="launch_profile",
+            error_code=error_code,
+            message=f"Launch blocked for profile {profile['name']} due to verification status: {profile.get('verification_status')}",
+            profile_id=profile_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": error_code, "message": f"Launch blocked: {error_code}"}
+        )
+
+    # Audit log for Admin override warning
+    if profile.get("verification_status") == "warning" and role in ("admin", "super_admin"):
+        log_activity(
+            module="main",
+            action="ADMIN_OVERRIDE_VERIFICATION_WARNING",
+            status="success",
+            message=f"Admin/Super Admin override verification warning for profile {profile['name']}",
+            profile_id=profile_id,
+        )
+
     current_status = browser_mgr.statuses.get(profile_id)
     if profile_id in browser_mgr.running or current_status in ("starting", "running", "stopping"):
         raise HTTPException(status_code=409, detail={"error_code": "PROFILE_ALREADY_RUNNING", "message": f"Profile is already {current_status or 'running'}"})
+
 
     try:
         running = await browser_mgr.launch(profile)
@@ -1474,10 +1960,37 @@ async def stop_profile(profile_id: str):
 
 
 @app.post("/api/profiles/{profile_id}/restart", response_model=LaunchResponse)
-async def restart_profile(profile_id: str):
+async def restart_profile(profile_id: str, request: Request):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+    
+    role = request.headers.get("x-user-role", "user").lower()
+    from backend.profile_verifier import can_launch_profile
+    allowed, error_code = can_launch_profile(profile, role)
+    if not allowed:
+        log_error(
+            module="main",
+            action="restart_profile",
+            error_code=error_code,
+            message=f"Restart blocked for profile {profile['name']} due to verification status: {profile.get('verification_status')}",
+            profile_id=profile_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": error_code, "message": f"Launch blocked: {error_code}"}
+        )
+
+    # Audit log for Admin override warning
+    if profile.get("verification_status") == "warning" and role in ("admin", "super_admin"):
+        log_activity(
+            module="main",
+            action="ADMIN_OVERRIDE_VERIFICATION_WARNING",
+            status="success",
+            message=f"Admin/Super Admin override verification warning for profile {profile['name']}",
+            profile_id=profile_id,
+        )
+
     
     # Gracefully stop first
     await browser_mgr.stop(profile_id)

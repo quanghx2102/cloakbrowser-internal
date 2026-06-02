@@ -27,7 +27,7 @@ describe("api.listProfiles", () => {
     const result = await api.listProfiles();
     expect(result).toEqual(profiles);
     expect(mockFetch).toHaveBeenCalledWith("http://127.0.0.1:8080/api/profiles", {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-User-Role": "user" },
     });
   });
 });

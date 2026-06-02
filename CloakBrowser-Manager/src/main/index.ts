@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Notification } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import findFreePort from 'find-free-port';
@@ -26,7 +26,7 @@ async function createWindow(port: number) {
   
   if (isDev) {
     mainWindow.loadURL(devUrl);
-    mainWindow.webContents.openDevTools();
+    // mainWindow.webContents.openDevTools();
   } else {
     mainWindow.loadFile(path.join(app.getAppPath(), 'frontend', 'dist', 'index.html'), {
       query: { api_port: port.toString() }
@@ -106,6 +106,22 @@ if (!gotTheLock) {
 
     backendManager.saveBinaryPath(binaryPath);
     return { success: true, path: binaryPath };
+  });
+
+  ipcMain.handle('show-runtime-notification', (_event, data: { title: string; body: string; profileId: string; severity: string }) => {
+    const { title, body, severity } = data;
+    if (severity !== 'critical') {
+      return { success: false, error: 'Only critical notifications allowed' };
+    }
+    if (!Notification.isSupported()) {
+      return { success: false, error: 'Notifications not supported' };
+    }
+    const notification = new Notification({
+      title: title || 'Profile stopped for safety',
+      body: body || 'Proxy IP changed unexpectedly'
+    });
+    notification.show();
+    return { success: true };
   });
 
   // Ensure the backend process is stopped when Electron exits unexpectedly

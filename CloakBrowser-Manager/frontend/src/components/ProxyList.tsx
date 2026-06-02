@@ -1,5 +1,5 @@
-import { Plus, Search, Server, Pencil, Activity, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { Plus, Search, Server, Pencil, Activity, Loader2, Trash2 } from "lucide-react";
+import { useState, useEffect } from "react";
 import type { Proxy } from "../lib/api";
 
 interface ProxyListProps {
@@ -9,6 +9,8 @@ interface ProxyListProps {
   onNew: () => void;
   onEdit: (id: string) => void;
   onCheck: (id: string) => Promise<void>;
+  onDelete?: (id: string) => Promise<void>;
+  onDeleteBatch?: (ids: string[]) => Promise<void>;
 }
 
 export function ProxyList({
@@ -18,9 +20,26 @@ export function ProxyList({
   onNew,
   onEdit,
   onCheck,
+  onDelete,
+  onDeleteBatch,
 }: ProxyListProps) {
   const [search, setSearch] = useState("");
   const [checkingId, setCheckingId] = useState<string | null>(null);
+
+  // Bulk select & Pagination states
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+
+  // Clear selections when search changes
+  useEffect(() => {
+    setSelectedIds([]);
+  }, [search]);
+
+  const handleSearchChange = (val: string) => {
+    setSearch(val);
+    setCurrentPage(1);
+  };
 
   const filtered = proxies.filter((p) => {
     return (
@@ -28,6 +47,12 @@ export function ProxyList({
       p.host.toLowerCase().includes(search.toLowerCase())
     );
   });
+
+  const totalPages = Math.ceil(filtered.length / pageSize) || 1;
+  const paginatedItems = filtered.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   return (
     <div className="flex flex-col h-full">
@@ -50,10 +75,41 @@ export function ProxyList({
             type="text"
             placeholder="Tìm kiếm proxy..."
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            onChange={(e) => handleSearchChange(e.target.value)}
             className="input pl-8 py-1.5 text-xs"
           />
         </div>
+
+        {/* Bulk Delete Banner */}
+        {selectedIds.length > 0 && (
+          <div className="mt-3 p-2 rounded bg-rose-500/10 border border-rose-500/20 flex items-center justify-between animate-in fade-in slide-in-from-top-1 duration-150">
+            <span className="text-[11px] font-medium text-rose-400">
+              Đang chọn {selectedIds.length} proxies
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setSelectedIds([])}
+                className="text-[10px] px-2 py-0.5 rounded hover:bg-surface-2 text-gray-400 font-medium transition-colors"
+              >
+                Hủy
+              </button>
+              <button
+                onClick={async () => {
+                  if (window.confirm(`Bạn có chắc chắn muốn xóa ${selectedIds.length} proxy đã chọn không?`)) {
+                    if (onDeleteBatch) {
+                      await onDeleteBatch(selectedIds);
+                      setSelectedIds([]);
+                    }
+                  }
+                }}
+                className="text-[10px] px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white font-medium transition-colors flex items-center gap-1"
+              >
+                <Trash2 className="h-3 w-3" />
+                <span>Xóa hàng loạt</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Table */}
@@ -68,6 +124,26 @@ export function ProxyList({
           <table className="w-full text-xs">
             <thead className="sticky top-0 bg-surface-1 z-10">
               <tr className="border-b border-border">
+                <th className="text-left px-3 py-2 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-[5%]">
+                  <input
+                    type="checkbox"
+                    checked={paginatedItems.length > 0 && paginatedItems.every(p => selectedIds.includes(p.id))}
+                    onChange={(e) => {
+                      if (e.target.checked) {
+                        setSelectedIds(prev => {
+                          const next = [...prev];
+                          paginatedItems.forEach(p => {
+                            if (!next.includes(p.id)) next.push(p.id);
+                          });
+                          return next;
+                        });
+                      } else {
+                        setSelectedIds(prev => prev.filter(id => !paginatedItems.some(p => p.id === id)));
+                      }
+                    }}
+                    className="rounded border-gray-700 bg-surface-2 text-accent focus:ring-accent"
+                  />
+                </th>
                 <th className="text-left px-3 py-2 text-[10px] font-medium text-gray-500 uppercase tracking-wider w-[35%]">
                   Tên proxy
                 </th>
@@ -83,7 +159,7 @@ export function ProxyList({
               </tr>
             </thead>
             <tbody>
-              {filtered.map((proxy) => {
+              {paginatedItems.map((proxy) => {
                 const isSelected = selectedId === proxy.id;
 
                 return (
@@ -96,6 +172,21 @@ export function ProxyList({
                         : "hover:bg-surface-2 border-l-2 border-l-transparent"
                     }`}
                   >
+                    {/* Checkbox */}
+                    <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(proxy.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedIds(prev => [...prev, proxy.id]);
+                          } else {
+                            setSelectedIds(prev => prev.filter(id => id !== proxy.id));
+                          }
+                        }}
+                        className="rounded border-gray-700 bg-surface-2 text-accent focus:ring-accent"
+                      />
+                    </td>
                     <td className="px-3 py-2.5">
                       <div className="font-medium text-gray-100 truncate max-w-[150px]" title={proxy.name}>
                         {proxy.name}
@@ -168,6 +259,20 @@ export function ProxyList({
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </button>
+                        {onDelete && (
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (window.confirm(`Bạn có chắc chắn muốn xóa proxy "${proxy.name}" không?`)) {
+                                await onDelete(proxy.id);
+                              }
+                            }}
+                            className="p-1 text-gray-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors"
+                            title="Xóa"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -177,6 +282,50 @@ export function ProxyList({
           </table>
         )}
       </div>
+
+      {/* Pagination Controls */}
+      {filtered.length > 0 && (
+        <div className="px-4 py-2 border-t border-border flex items-center justify-between text-xs text-gray-400 bg-surface-1 select-none flex-shrink-0">
+          <div className="flex items-center gap-2">
+            <span>Hiển thị</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setCurrentPage(1);
+              }}
+              className="bg-surface-2 border border-border rounded px-1.5 py-0.5 text-xs text-gray-200 focus:outline-none focus:border-accent"
+            >
+              {[5, 10, 20, 50].map((size) => (
+                <option key={size} value={size}>
+                  {size} dòng
+                </option>
+              ))}
+            </select>
+            <span>/ {filtered.length} dòng</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+              disabled={currentPage === 1}
+              className="px-2 py-0.5 rounded bg-surface-2 border border-border hover:bg-surface-3 disabled:opacity-40 disabled:hover:bg-surface-2 transition-colors text-[10px]"
+            >
+              Trước
+            </button>
+            <span className="px-2 py-0.5 font-medium text-gray-200 text-[10px]">
+              Trang {currentPage} / {totalPages}
+            </span>
+            <button
+              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+              disabled={currentPage === totalPages}
+              className="px-2 py-0.5 rounded bg-surface-2 border border-border hover:bg-surface-3 disabled:opacity-40 disabled:hover:bg-surface-2 transition-colors text-[10px]"
+            >
+              Sau
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* New proxy button */}
       <div className="p-3 border-t border-border flex-shrink-0">
